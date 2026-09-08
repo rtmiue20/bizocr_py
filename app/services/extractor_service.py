@@ -1,14 +1,15 @@
 import re
 
-
 class DocumentExtractor:
-    """
-    Trích xuất field theo từng loại chứng từ (doc_type), đồng bộ logic
-    và tên field với FieldExtractorService.java bên phía Java Spring Boot:
-      - VAT_INVOICE / HOA_DON_VAT      -> tax_code, total_amount
-      - ELECTRICITY_BILL / HOA_DON_DIEN -> customer_id, total_amount
-      - WATER_BILL / HOA_DON_NUOC       -> customer_id, total_amount
-    """
+    # Định nghĩa field bắt buộc theo từng loại chứng từ, dùng để tính confidence thực tế
+    REQUIRED_FIELDS = {
+        "VAT_INVOICE": ["tax_code", "total_amount"],
+        "HOA_DON_VAT": ["tax_code", "total_amount"],
+        "ELECTRICITY_BILL": ["customer_id", "total_amount"],
+        "HOA_DON_DIEN": ["customer_id", "total_amount"],
+        "WATER_BILL": ["customer_id", "total_amount"],
+        "HOA_DON_NUOC": ["customer_id", "total_amount"],
+    }
 
     # Regex tổng tiền dùng chung, đồng bộ với Java (đủ 4 biến thể từ khóa)
     AMOUNT_PATTERN = re.compile(
@@ -34,15 +35,17 @@ class DocumentExtractor:
         normalized_type = (doc_type or "UNKNOWN").upper()
 
         if normalized_type in ("VAT_INVOICE", "HOA_DON_VAT"):
-            return self._extract_vat_invoice(raw_text)
-        elif normalized_type in ("ELECTRICITY_BILL", "HOA_DON_DIEN"):
-            return self._extract_utility_bill(raw_text)
-        elif normalized_type in ("WATER_BILL", "HOA_DON_NUOC"):
-            return self._extract_utility_bill(raw_text)
+            fields = self._extract_vat_invoice(raw_text)
+        elif normalized_type in ("ELECTRICITY_BILL", "HOA_DON_DIEN", "WATER_BILL", "HOA_DON_NUOC"):
+            fields = self._extract_utility_bill(raw_text)
         else:
-            # Loại chứng từ chưa có quy tắc Regex riêng -> thử fallback VAT
-            # (giữ hành vi an toàn thay vì trả rỗng hoàn toàn)
-            return self._extract_vat_invoice(raw_text)
+            fields = self._extract_vat_invoice(raw_text)
+
+        # Gắn cờ field nào bị thiếu so với danh sách bắt buộc, dùng để tính confidence phía router
+        required = self.REQUIRED_FIELDS.get(normalized_type, [])
+        fields["_missing_required_fields"] = [f for f in required if f not in fields or fields.get(f) is None]
+
+        return fields
 
     def _extract_vat_invoice(self, raw_text: str) -> dict:
         fields = {}
@@ -74,9 +77,39 @@ class DocumentExtractor:
         money_match = self.AMOUNT_PATTERN.search(raw_text)
         if not money_match:
             return None
+        # Loại bỏ tất cả ký tự không phải số (bao gồm cả dấu chấm, phẩy)
         clean_money = re.sub(r'[^\d]', '', money_match.group(1))
         return int(clean_money) if clean_money else None
 
 
 # Khởi tạo instance để ml_router import
 extractor_service = DocumentExtractor()
+
+
+# Phần test độc lập: Chỉ chạy khi thực thi trực tiếp file này (python document_extractor.py)
+if __name__ == "__main__":
+    test_cases = [
+        {
+            "doc_type": "HOA_DON_VAT",
+            "text": "Công ty TNHH ABC\nMã số thuế: 0101234567-001\nCộng tiền hàng: 1.500.000 đ\nThuế VAT: 10%"
+        },
+        {
+            "doc_type": "ELECTRICITY_BILL",
+            "text": "Điện lực Cầu Giấy\nMã khách hàng: PE0123456789\nChỉ số cũ: 100\nTổng cộng tiền thanh toán: 850,500 VNĐ"
+        },
+        {
+            "doc_type": "WATER_BILL",
+            "text": "Công ty nước sạch Hà Nội\nSố danh bộ: 09A12345\nThành tiền: 125.000"
+        },
+        {
+            "doc_type": "UNKNOWN_DOC",
+            "text": "Biên lai thu tiền\nMST: 0312456789\nTổng tiền thanh toán: 50.000"
+        }
+    ]
+
+    print("--- CHẠY THỬ NGHIỆM TRÍCH XUẤT ---")
+    for idx, case in enumerate(test_cases, 1):
+        result = extractor_service.extract_fields(case["text"], case["doc_type"])
+        print(f"\nTest {idx} - Loại: {case['doc_type']}")
+        print(f"Dữ liệu đầu vào: {case['text'].replace(chr(10), ' | ')}")
+        print(f"Kết quả: {result}")

@@ -60,6 +60,19 @@ async def extract_document_fields(req: ExtractRequest):
     """Spring Boot gọi API này để bóc tách thông tin chi tiết (MST, Tổng tiền...) từ văn bản OCR"""
     try:
         fields = extractor_service.extract_fields(req.rawText, req.documentType)
+        missing_fields = fields.pop("_missing_required_fields", [])
+
+        # Confidence: field matches được regex = 1.0 (chắc chắn); field bắt buộc bị thiếu = 0.0 (cảnh báo review)
+        confidences = {}
+        for key, value in fields.items():
+            if value is not None:
+                confidences[key] = 1.0
+
+        for missing_key in missing_fields:
+            confidences[missing_key] = 0.0
+
+        fields["field_confidences"] = confidences
+
         return {
             "status": "success",
             "extractedFields": fields
@@ -67,7 +80,6 @@ async def extract_document_fields(req: ExtractRequest):
     except Exception as e:
         logger.error(f"Lỗi khi bóc tách thông tin: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.post("/train-pipeline")
 async def trigger_full_pipeline():
