@@ -5,6 +5,7 @@ from typing import Tuple
 
 logger = logging.getLogger(__name__)
 
+
 class ImageCleaner:
     """
     OpenCV Pipeline: Ảnh gốc -> Ảnh sạch (Deskew, Denoise, CLAHE, Shadow Removal, Sharpen)
@@ -26,8 +27,10 @@ class ImageCleaner:
         return encoded.tobytes()
 
     @staticmethod
-    def resize_if_needed(image: np.ndarray, max_dim: int = 2500) -> np.ndarray:
+    def resize_if_needed(image: np.ndarray, max_dim: int = 4000) -> np.ndarray:
         h, w = image.shape[:2]
+        # Thêm log để kiểm tra kích thước gốc thiết bị gửi lên so với giới hạn
+        logger.info(f"Kích thước ảnh gốc nhận được: {w}x{h} (ngưỡng max_dim={max_dim})")
         if max(h, w) > max_dim:
             scale = max_dim / float(max(h, w))
             new_w = int(w * scale)
@@ -39,18 +42,38 @@ class ImageCleaner:
     @staticmethod
     def compute_skew_angle(gray: np.ndarray) -> float:
         """
-        Tính góc nghiêng của văn bản bằng minAreaRect trên text pixels
+        Tính góc nghiêng của văn bản bằng minAreaRect trên text pixels (đã lọc khối đồ họa đặc)
         """
         try:
             # Nhị phân hóa nghịch đảo (chữ trắng nền đen)
             thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
 
-            # Tìm tọa độ các pixel văn bản
-            coords = np.column_stack(np.where(thresh > 0))
-            if len(coords) < 100:
+            # Tìm contours thay vì lấy mù quáng toàn bộ pixel > 0
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            text_like_coords = []
+            img_area = gray.shape[0] * gray.shape[1]
+
+            for c in contours:
+                area = cv2.contourArea(c)
+                # Loại bỏ block lớn (nền màu đặc/logo) - nét chữ chỉ chiếm phần siêu nhỏ (< 1%) diện tích ảnh
+                if 0 < area < img_area * 0.01:
+                    text_like_coords.append(c)
+
+            # Nếu không tìm thấy thành phần nào giống chữ, bỏ qua việc xoay
+            if not text_like_coords:
                 return 0.0
 
-            angle = cv2.minAreaRect(coords)[-1]
+            # Gộp tọa độ của tất cả các nét chữ hợp lệ lại thành một cụm duy nhất
+            all_coords = np.vstack(text_like_coords)
+
+            if len(all_coords) < 100:
+                return 0.0
+
+            # Tính góc xoay bao trọn các nét chữ
+            angle = cv2.minAreaRect(all_coords)[-1]
+
+            # Chuẩn hóa góc quay về khoảng [-45, 45] độ
             if angle < -45:
                 angle = -(90 + angle)
             elif angle > 45:
@@ -58,9 +81,9 @@ class ImageCleaner:
             else:
                 angle = -angle
 
-            # Nếu góc quá lớn (ảnh dọc/ngang bình thường), có thể là do nhầm hướng
             if abs(angle) > 45:
                 return 0.0
+
             return angle
         except Exception as e:
             logger.warning(f"Lỗi khi tính góc nghiêng: {e}")
@@ -81,13 +104,13 @@ class ImageCleaner:
         h, w = image.shape[:2]
         center = (w // 2, h // 2)
         rot_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
-        
+
         # Tính kích thước mới để không bị cắt xén góc
         cos = np.abs(rot_matrix[0, 0])
         sin = np.abs(rot_matrix[0, 1])
         new_w = int((h * sin) + (w * cos))
         new_h = int((h * cos) + (w * sin))
-        
+
         rot_matrix[0, 2] += (new_w / 2) - center[0]
         rot_matrix[1, 2] += (new_h / 2) - center[1]
 
@@ -102,24 +125,19 @@ class ImageCleaner:
     @staticmethod
     def remove_shadow_and_enhance(image: np.ndarray) -> np.ndarray:
         """
-        Khử bóng đổ, cân bằng sáng và tăng tương phản ký tự bằng CLAHE
+        Cân bằng sáng và tăng tương phản cục bộ bằng CLAHE.
+        (Đã loại bỏ bước chia nền Morphological Closing để bảo toàn tương phản
+        cho các trường hợp chữ sáng/trắng trên nền đồ họa tối đặc).
         """
         if len(image.shape) == 3:
             # Chuyển sang không gian màu LAB để xử lý kênh sáng L
             lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
             l_channel, a_channel, b_channel = cv2.split(lab)
-            
-            # Khử bóng đổ: Morphological closing ước lượng nền
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
-            background = cv2.morphologyEx(l_channel, cv2.MORPH_CLOSE, kernel)
-            
-            # Trừ nền để làm đều độ sáng
-            normalized_l = cv2.divide(l_channel, background, scale=255)
-            
-            # Áp dụng CLAHE (Contrast Limited Adaptive Histogram Equalization)
+
+            # Áp dụng CLAHE trực tiếp trên kênh L gốc
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced_l = clahe.apply(normalized_l)
-            
+            enhanced_l = clahe.apply(l_channel)
+
             # Gộp lại và chuyển về BGR
             enhanced_lab = cv2.merge((enhanced_l, a_channel, b_channel))
             enhanced_bgr = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
@@ -147,21 +165,21 @@ class ImageCleaner:
         return sharpened
 
     @classmethod
-    def clean(cls, image_bytes: bytes, max_dim: int = 2500) -> Tuple[np.ndarray, bytes]:
+    def clean(cls, image_bytes: bytes, max_dim: int = 4000) -> Tuple[np.ndarray, bytes]:
         """
         Quy trình xử lý hoàn chỉnh: Ảnh gốc -> Ảnh sạch
         """
         raw_img = cls.decode_image(image_bytes)
         img_resized = cls.resize_if_needed(raw_img, max_dim=max_dim)
-        
+
         # 1. Deskew (Xoay thẳng)
         deskewed = cls.deskew(img_resized)
-        
+
         # 2. Khử bóng & Tăng tương phản
         enhanced = cls.remove_shadow_and_enhance(deskewed)
-        
+
         # 3. Khử nhiễu & Làm nét ký tự
         cleaned = cls.denoise_and_sharpen(enhanced)
-        
+
         cleaned_bytes = cls.encode_image(cleaned, format=".jpg")
         return cleaned, cleaned_bytes

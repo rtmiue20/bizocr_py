@@ -1,60 +1,103 @@
 import logging
 import numpy as np
+import cv2
 from typing import List, Dict, Any, Tuple
+from PIL import Image
 from python_service.config import settings
 
 logger = logging.getLogger(__name__)
 
+
 class PaddleOcrEngine:
     """
-    Module PaddleOCR: Ảnh sạch -> OCR thô (Bounding Boxes + Text lines + Spatial Sorting)
+    Module Hybrid OCR:
+    - PaddleOCR Text Detector: Nhận diện vùng chứa chữ (Detection) trực tiếp từ DBNet
+    - VietOCR: Đọc chữ tiếng Việt (Recognition) để đảm bảo chính xác dấu tiếng Việt
     """
 
     def __init__(self):
-        self._ocr = None
+        self._det_engine = None
+        self._rec_engine = None
         self._initialized = False
-        self._engine_name = "paddleocr"
+        self._engine_name = "hybrid_paddle_vietocr"
 
-    def _get_ocr(self):
+    def _init_engines(self):
         if not self._initialized:
             try:
                 from paddleocr import PaddleOCR
-                logger.info(f"Đang khởi tạo PaddleOCR (lang={settings.OCR_LANG}, use_gpu={settings.USE_GPU})...")
-                self._ocr = PaddleOCR(
+                from vietocr.tool.predictor import Predictor
+                from vietocr.tool.config import Cfg
+
+                # 1. Khởi tạo PaddleOCR chỉ phục vụ Text Detection
+                max_dim = settings.OCR_MAX_IMAGE_DIM
+                det_limit = (max_dim // 32) * 32
+                if det_limit < max_dim:
+                    det_limit += 32
+
+                logger.info(f"Khởi tạo PaddleOCR Det-only (det_limit_side_len={det_limit})...")
+                self._det_engine = PaddleOCR(
                     use_angle_cls=True,
-                    lang=settings.OCR_LANG,
+                    lang="en",
                     use_gpu=settings.USE_GPU,
+                    det_limit_side_len=det_limit,
+                    det_db_unclip_ratio=2.0,
                     show_log=False
                 )
-                self._engine_name = "paddleocr"
+
+                # 2. VietOCR chuyên biệt cho Recognition tiếng Việt
+                logger.info("Khởi tạo VietOCR vgg_transformer...")
+                config = Cfg.load_config_from_name('vgg_transformer')
+                config['device'] = 'cuda:0' if settings.USE_GPU else 'cpu'
+                self._rec_engine = Predictor(config)
+
                 self._initialized = True
-                logger.info("PaddleOCR đã khởi tạo thành công!")
+                logger.info("Hybrid OCR khởi tạo thành công!")
             except Exception as e:
-                logger.warning(f"Không thể khởi tạo PaddleOCR ({e}). Đang thử chuyển sang RapidOCR/Fallback...")
-                try:
-                    from rapidocr_onnxruntime import RapidOCR
-                    self._ocr = RapidOCR()
-                    self._engine_name = "rapidocr"
-                    self._initialized = True
-                    logger.info("RapidOCR đã khởi tạo thành công!")
-                except Exception as ex:
-                    logger.error(f"Cả PaddleOCR và RapidOCR đều không khả dụng: {ex}")
-                    self._ocr = None
-                    self._initialized = True
-        return self._ocr
+                logger.error(f"Lỗi khởi tạo Hybrid OCR: {e}", exc_info=True)
+                self._initialized = True
+
+    def _crop_image_by_points(self, img: np.ndarray, points: list) -> Image.Image:
+        """Cắt và nắn thẳng bounding box từ ảnh gốc bằng Perspective Transform"""
+        pts = np.array(points, dtype=np.float32).reshape(4, 2)
+
+        rect = np.zeros((4, 2), dtype=np.float32)
+        s = pts.sum(axis=1)
+        rect[0] = pts[np.argmin(s)]
+        rect[2] = pts[np.argmax(s)]
+        diff = np.diff(pts, axis=1)
+        rect[1] = pts[np.argmin(diff)]
+        rect[3] = pts[np.argmax(diff)]
+
+        (tl, tr, br, bl) = rect
+        widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
+        widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+        maxWidth = max(int(widthA), int(widthB))
+
+        heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+        heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+        maxHeight = max(int(heightA), int(heightB))
+
+        dst = np.array([
+            [0, 0],
+            [maxWidth - 1, 0],
+            [maxWidth - 1, maxHeight - 1],
+            [0, maxHeight - 1]
+        ], dtype=np.float32)
+
+        M = cv2.getPerspectiveTransform(rect, dst)
+        warped = cv2.warpPerspective(img, M, (maxWidth, maxHeight))
+
+        return Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
 
     @staticmethod
     def _sort_reading_order(ocr_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Sắp xếp các bounding box theo thứ tự đọc tự nhiên của con người (Top-to-Bottom, Left-to-Right)
-        """
+        """Sắp xếp các bounding box theo thứ tự đọc tự nhiên (Top-to-Bottom, Left-to-Right)"""
         if not ocr_results:
             return []
 
-        # Tính toán Y_center, X_min, Height cho mỗi box
         boxes_with_metrics = []
         for item in ocr_results:
-            pts = item["points"] # [x1,y1, x2,y2, x3,y3, x4,y4]
+            pts = item["points"]
             xs = pts[0::2]
             ys = pts[1::2]
             y_min, y_max = min(ys), max(ys)
@@ -68,10 +111,8 @@ class PaddleOcrEngine:
                 "height": height
             })
 
-        # Sắp xếp thô theo Y
         boxes_with_metrics.sort(key=lambda b: b["y_center"])
 
-        # Gom nhóm theo từng dòng văn bản
         lines = []
         current_line = []
         current_line_y = None
@@ -83,15 +124,12 @@ class PaddleOcrEngine:
                 current_line_y = b["y_center"]
                 current_line_h = b["height"]
             else:
-                # Nếu độ lệch Y_center < 0.6 * chiều cao dòng thì thuộc cùng 1 dòng
                 threshold = max(current_line_h, b["height"]) * 0.6
                 if abs(b["y_center"] - current_line_y) <= threshold:
                     current_line.append(b)
-                    # Cập nhật Y_center trung bình của dòng
                     current_line_y = sum(x["y_center"] for x in current_line) / len(current_line)
                     current_line_h = sum(x["height"] for x in current_line) / len(current_line)
                 else:
-                    # Sắp xếp các box trong dòng hiện tại từ trái qua phải
                     current_line.sort(key=lambda x: x["x_min"])
                     lines.append(current_line)
                     current_line = [b]
@@ -102,64 +140,42 @@ class PaddleOcrEngine:
             current_line.sort(key=lambda x: x["x_min"])
             lines.append(current_line)
 
-        # Gộp tất cả theo thứ tự dòng
-        sorted_results = []
-        for line in lines:
-            for b in line:
-                sorted_results.append(b["item"])
-
-        return sorted_results
+        return [b["item"] for line in lines for b in line]
 
     def recognize(self, image: np.ndarray) -> Tuple[str, float, List[Dict[str, Any]], str]:
-        """
-        Thực hiện OCR trên ảnh sạch:
-        Returns:
-            raw_text: Chuỗi văn bản thô ghép từ các dòng
-            confidence: Điểm tin cậy trung bình (0.0 - 1.0)
-            boxes: Danh sách bounding boxes [{"text": ..., "points": [x1,y1,...]}]
-            engine_name: Tên engine ("paddleocr")
-        """
-        engine = self._get_ocr()
-        if engine is None:
-            return "", 0.0, [], "paddleocr"
+        self._init_engines()
+        if not self._det_engine or not self._rec_engine:
+            return "", 0.0, [], self._engine_name
 
         parsed_boxes = []
         confidences = []
 
         try:
-            if self._engine_name == "paddleocr":
-                results = engine.ocr(image, cls=True)
-                if results and len(results) > 0 and results[0] is not None:
-                    for line in results[0]:
-                        box_points_2d, (text, conf) = line
-                        # Flatten 4 points [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] -> [x1,y1, x2,y2, x3,y3, x4,y4]
-                        flat_points = [int(coord) for pt in box_points_2d for coord in pt]
-                        parsed_boxes.append({
-                            "text": text.strip(),
-                            "points": flat_points
-                        })
-                        confidences.append(float(conf))
-            elif self._engine_name == "rapidocr":
-                results, elapse = engine(image)
-                if results:
-                    for line in results:
-                        box_points_2d, text, conf = line
-                        flat_points = [int(coord) for pt in box_points_2d for coord in pt]
-                        parsed_boxes.append({
-                            "text": text.strip(),
-                            "points": flat_points
-                        })
-                        confidences.append(float(conf))
+            # Gọi trực tiếp module text_detector để tránh lỗi 'if not dt_boxes:' của wrapper .ocr()
+            dt_boxes, _ = self._det_engine.text_detector(image)
+
+            if dt_boxes is not None and len(dt_boxes) > 0:
+                for box_points in dt_boxes:
+                    if box_points is None or len(box_points) == 0:
+                        continue
+
+                    # Cắt ảnh theo box và gửi sang VietOCR
+                    cropped_pil = self._crop_image_by_points(image, box_points)
+                    text, conf = self._rec_engine.predict(cropped_pil, return_prob=True)
+
+                    flat_points = [int(coord) for pt in box_points for coord in pt]
+                    parsed_boxes.append({
+                        "text": str(text).strip(),
+                        "points": flat_points
+                    })
+                    confidences.append(float(conf))
+
         except Exception as e:
-            logger.error(f"Lỗi khi chạy OCR: {e}", exc_info=True)
+            logger.error(f"Lỗi khi chạy Hybrid OCR: {e}", exc_info=True)
             return "", 0.0, [], self._engine_name
 
-        # Sắp xếp spatial reading order
         sorted_boxes = self._sort_reading_order(parsed_boxes)
-        
-        # Ghép thành raw_text thô
-        raw_text_lines = [b["text"] for b in sorted_boxes if b.get("text")]
-        raw_text = "\n".join(raw_text_lines)
-
+        raw_text = "\n".join([b["text"] for b in sorted_boxes if b.get("text")])
         avg_confidence = float(np.mean(confidences)) if confidences else 0.0
+
         return raw_text, avg_confidence, sorted_boxes, self._engine_name
