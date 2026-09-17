@@ -5,6 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from python_service.config import settings
 from python_service.api.routes_ocr import router as ocr_router
 from python_service.api.routes_ml import router as ml_router
+from python_service.api.routes_search import router as search_router
+
 
 # Thiết lập logging
 logging.basicConfig(
@@ -31,6 +33,7 @@ app.add_middleware(
 # Đăng ký Routers
 app.include_router(ocr_router)
 app.include_router(ml_router)
+app.include_router(search_router)
 
 @app.get("/")
 @app.get("/health")

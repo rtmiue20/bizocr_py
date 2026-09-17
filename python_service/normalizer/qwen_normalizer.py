@@ -72,7 +72,7 @@ class QwenTextNormalizer:
 
     async def normalize_text(self, raw_ocr_text: str) -> str:
         """
-        Gửi đoạn OCR thô sang mô hình qwen2.5:3b để sửa lỗi OCR tiếng Việt và định dạng thành Văn bản chuẩn.
+        Gửi đoạn OCR thô sang mô hình qwen2.5:3b-instruct để sửa lỗi OCR tiếng Việt và định dạng thành Văn bản chuẩn.
         """
         if not raw_ocr_text or len(raw_ocr_text.strip()) < 5:
             return raw_ocr_text or ""
