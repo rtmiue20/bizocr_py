@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel
+from typing import List, Optional
 
 class BoundingBoxDto(BaseModel):
     text: str
@@ -20,8 +20,10 @@ class OcrResponseDto(BaseModel):
     originalHeight: Optional[int] = 0
     contourAreaRatio: Optional[float] = 0.0
     laplacianVariance: Optional[float] = 0.0
+    meanBrightness: Optional[float] = 0.0
     deskewAngle: Optional[float] = 0.0
     isCropped: Optional[bool] = False
+    cropFailed: Optional[bool] = True
     qualityPassed: Optional[bool] = True
     qualityReasons: List[str] = []
     qualityMode: Optional[str] = "SHADOW"

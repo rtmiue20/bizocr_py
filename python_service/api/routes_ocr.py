@@ -39,7 +39,7 @@ def _quality_config() -> QualityGateConfig:
 @router.post("/ocr", response_model=OcrResponseDto)
 async def process_ocr(
         file: UploadFile = File(...),
-        normalize_with_llm: bool = Query(default=True, description="Chuẩn hóa văn bản bằng Qwen2.5:3B")
+        normalize_with_llm: bool = Query(default=True, description="Chuẩn hóa văn bản bằng Qwen2.5:3B-instruct")
 ):
     try:
         content = await file.read()
@@ -60,6 +60,8 @@ async def process_ocr(
                         "aspectRatioAfterCrop": img_meta.get("aspect_ratio_after_crop"),
                         "width": img_meta.get("width"),
                         "height": img_meta.get("height"),
+                        "meanBrightness": img_meta.get("mean_brightness"),
+                        "cropFailed": img_meta.get("crop_failed")
                     },
                 },
             )
@@ -84,9 +86,7 @@ async def process_ocr(
         if normalize_with_llm and raw_ocr_text and not should_skip_llm:
             final_text = await qwen_normalizer.normalize_text(raw_ocr_text)
 
-        formatted_boxes = [
-            BoundingBoxDto(text=b["text"], points=b["points"]) for b in boxes
-        ]
+        formatted_boxes = [BoundingBoxDto(text=b["text"], points=b["points"]) for b in boxes]
 
         return OcrResponseDto(
             rawText=final_text,
@@ -103,8 +103,9 @@ async def process_ocr(
             originalHeight=img_meta["original_height"],
             contourAreaRatio=img_meta["contour_area_ratio"],
             laplacianVariance=img_meta["laplacian_variance"],
-            deskewAngle=img_meta["deskew_angle"],
+            meanBrightness=img_meta["mean_brightness"],
             isCropped=img_meta["is_cropped"],
+            cropFailed=img_meta["crop_failed"],
             qualityPassed=quality.passed,
             qualityReasons=quality.reasons,
             qualityMode=quality.mode.upper(),

@@ -114,11 +114,43 @@ class VideoFileFrameSource(FrameSource):
 
 class CameraFrameSource(FrameSource):
     """
-    TODO (Bước 4): cầu nối tới camera thật qua cổng C.
-    Cần biết từ header/SDK: hệ điều hành, hàm init/open, hàm lấy khung, hàm close,
-    định dạng pixel (BGR/RGB/YUV), stride, ai giải phóng bộ nhớ, hàm nào blocking.
-    Chạy lớp này trong TIẾN TRÌNH RIÊNG để lỗi native không làm sập OCR service.
+    Kết nối với Webcam USB (như Ugreen 4K) thông qua OpenCV.
+    Không cần C-binding/SDK vì thiết bị dùng chuẩn UVC (USB Video Class).
     """
 
+    def __init__(self, camera_index=0, width=3840, height=2160):
+        self.camera_index = camera_index
+        # Mặc định ép lấy độ phân giải 4K (8MP) của Ugreen để OCR rõ nét nhất
+        self.width = width
+        self.height = height
+        self._cap = None
+
+    def open(self) -> None:
+        # Mở kết nối camera (Trên Windows có thể thêm cv2.CAP_DSHOW nếu khởi động chậm)
+        self._cap = cv2.VideoCapture(self.camera_index)
+        if not self._cap.isOpened():
+            raise IOError(f"Không thể kết nối với webcam ở index {self.camera_index}")
+
+        # Ép độ phân giải phần cứng
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+
+        # Đọc bỏ 5-10 khung hình đầu tiên để webcam lấy nét (Auto-Focus)
+        # và cân bằng sáng (Auto-Exposure) ổn định.
+        for _ in range(10):
+            self._cap.read()
+
     def read(self) -> Optional[np.ndarray]:
-        raise NotImplementedError("Chưa có binding tới cổng C của camera")
+        if self._cap is None:
+            self.open()
+
+        ok, frame = self._cap.read()
+        if not ok:
+            return None
+
+        return frame
+
+    def close(self) -> None:
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None

@@ -27,6 +27,8 @@ class QualityGateConfig:
     min_laplacian_variance: float = 40.0
     min_aspect_ratio: float = 0.30
     max_aspect_ratio: float = 3.50
+    min_brightness: float = 35.0
+    max_brightness: float = 230.0
     require_crop: bool = False
 
 
@@ -69,16 +71,13 @@ class QualityGateMetrics:
                 "mode": None,
             }
 
-
 _metrics = QualityGateMetrics()
-
 
 def metrics_snapshot(config: Optional[QualityGateConfig] = None) -> Dict[str, Any]:
     snap = _metrics.snapshot()
     if config is not None:
         snap["mode"] = config.mode
     return snap
-
 
 def evaluate(metadata: Dict[str, Any], config: QualityGateConfig) -> QualityResult:
     reasons: List[str] = []
@@ -91,7 +90,8 @@ def evaluate(metadata: Dict[str, Any], config: QualityGateConfig) -> QualityResu
         else (metadata.get("aspect_ratio") or 0.0)
     )
     laplacian = float(metadata.get("laplacian_variance") or 0.0)
-    cropped = bool(metadata.get("is_cropped"))
+    brightness = float(metadata.get("mean_brightness") or 128.0)
+    cropped = bool(not metadata.get("crop_failed", True))
 
     if contour < config.min_contour_area_ratio:
         reasons.append("CONTOUR_AREA_TOO_SMALL")
@@ -99,6 +99,10 @@ def evaluate(metadata: Dict[str, Any], config: QualityGateConfig) -> QualityResu
         reasons.append("RESOLUTION_TOO_LOW")
     if laplacian < config.min_laplacian_variance:
         reasons.append("IMAGE_BLURRY")
+    if brightness < config.min_brightness:
+        reasons.append("IMAGE_TOO_DARK")
+    if brightness > config.max_brightness:
+        reasons.append("IMAGE_TOO_BRIGHT")
     if aspect < config.min_aspect_ratio or aspect > config.max_aspect_ratio:
         reasons.append("ASPECT_RATIO_OUT_OF_RANGE")
     if config.require_crop and not cropped:
@@ -110,7 +114,7 @@ def evaluate(metadata: Dict[str, Any], config: QualityGateConfig) -> QualityResu
     if reasons:
         logger.warning(
             "quality_gate mode=%s passed=%s reasons=%s contour_area_ratio=%s "
-            "aspect_ratio_after_crop=%s size=%sx%s laplacian=%s cropped=%s",
+            "aspect_ratio_after_crop=%s size=%sx%s laplacian=%s brightness=%s cropped=%s",
             config.mode,
             result.passed,
             ",".join(reasons),
@@ -119,13 +123,15 @@ def evaluate(metadata: Dict[str, Any], config: QualityGateConfig) -> QualityResu
             width,
             height,
             laplacian,
+            brightness,
             cropped,
         )
     else:
         logger.info(
-            "quality_gate mode=%s passed=true contour_area_ratio=%s aspect_ratio_after_crop=%s",
+            "quality_gate mode=%s passed=true contour_area_ratio=%s aspect_ratio_after_crop=%s brightness=%s",
             config.mode,
             contour,
             aspect,
+            brightness
         )
     return result
