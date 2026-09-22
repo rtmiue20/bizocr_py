@@ -24,5 +24,22 @@ class Settings(BaseModel):
     ENHANCE_CONTRAST: bool = True
     DENOISE: bool = True
 
+    # Quality gate after crop/deskew. shadow = attach + log, still OCR.
+    # enforce = HTTP 422 trước OCR nếu không đạt. Đổi khi đã đo tỉ lệ false-positive.
+    QUALITY_GATE_MODE: str = os.getenv("QUALITY_GATE_MODE", "shadow").lower()
+    QUALITY_GATE_MIN_CONTOUR_AREA_RATIO: float = float(
+        os.getenv("QUALITY_GATE_MIN_CONTOUR_AREA_RATIO", "0.08")
+    )
+    QUALITY_GATE_MIN_WIDTH: int = int(os.getenv("QUALITY_GATE_MIN_WIDTH", "200"))
+    QUALITY_GATE_MIN_HEIGHT: int = int(os.getenv("QUALITY_GATE_MIN_HEIGHT", "200"))
+    QUALITY_GATE_MIN_LAPLACIAN: float = float(
+        os.getenv("QUALITY_GATE_MIN_LAPLACIAN", "40")
+    )
+    QUALITY_GATE_MIN_ASPECT: float = float(os.getenv("QUALITY_GATE_MIN_ASPECT", "0.30"))
+    QUALITY_GATE_MAX_ASPECT: float = float(os.getenv("QUALITY_GATE_MAX_ASPECT", "3.50"))
+    QUALITY_GATE_REQUIRE_CROP: bool = os.getenv(
+        "QUALITY_GATE_REQUIRE_CROP", "false"
+    ).lower() in ("true", "1", "t")
+
 
 settings = Settings()

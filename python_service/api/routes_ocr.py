@@ -3,8 +3,14 @@ from fastapi import APIRouter, File, UploadFile, HTTPException, Query
 from fastapi.responses import Response
 
 from python_service.api.models import OcrResponseDto, BoundingBoxDto
+from python_service.config import settings
 from python_service.preprocessing.image_preprocessor import ImagePreprocessor
 from python_service.preprocessing.image_cleaner import ImageCleaner
+from python_service.preprocessing.quality_gate import (
+    QualityGateConfig,
+    evaluate as evaluate_quality,
+    metrics_snapshot,
+)
 from python_service.preprocessing.structural_heuristics import StructuralHeuristics
 from python_service.ocr.paddle_ocr_engine import PaddleOcrEngine
 from python_service.normalizer.qwen_normalizer import QwenTextNormalizer
@@ -15,6 +21,19 @@ router = APIRouter(prefix="/api/v1", tags=["OCR & Vision Pipeline"])
 
 ocr_engine = PaddleOcrEngine()
 qwen_normalizer = QwenTextNormalizer()
+
+
+def _quality_config() -> QualityGateConfig:
+    return QualityGateConfig(
+        mode=settings.QUALITY_GATE_MODE,
+        min_contour_area_ratio=settings.QUALITY_GATE_MIN_CONTOUR_AREA_RATIO,
+        min_width=settings.QUALITY_GATE_MIN_WIDTH,
+        min_height=settings.QUALITY_GATE_MIN_HEIGHT,
+        min_laplacian_variance=settings.QUALITY_GATE_MIN_LAPLACIAN,
+        min_aspect_ratio=settings.QUALITY_GATE_MIN_ASPECT,
+        max_aspect_ratio=settings.QUALITY_GATE_MAX_ASPECT,
+        require_crop=settings.QUALITY_GATE_REQUIRE_CROP,
+    )
 
 
 @router.post("/ocr", response_model=OcrResponseDto)
@@ -29,6 +48,21 @@ async def process_ocr(
 
         # TẦNG 0: Deskew + Auto-Crop lấy Metadata
         processed_bytes, img_meta = ImagePreprocessor.process(content)
+        quality = evaluate_quality(img_meta, _quality_config())
+        if not quality.passed and quality.mode == "enforce":
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "QUALITY_GATE_FAILED",
+                    "reasons": quality.reasons,
+                    "metadata": {
+                        "contourAreaRatio": img_meta.get("contour_area_ratio"),
+                        "aspectRatioAfterCrop": img_meta.get("aspect_ratio_after_crop"),
+                        "width": img_meta.get("width"),
+                        "height": img_meta.get("height"),
+                    },
+                },
+            )
 
         # BƯỚC 1: Làm sạch ảnh
         cleaned_img, _ = ImageCleaner.clean(processed_bytes)
@@ -64,12 +98,22 @@ async def process_ocr(
             width=img_meta["width"],
             height=img_meta["height"],
             aspectRatio=img_meta["aspect_ratio"],
+            aspectRatioAfterCrop=img_meta["aspect_ratio_after_crop"],
+            originalWidth=img_meta["original_width"],
+            originalHeight=img_meta["original_height"],
+            contourAreaRatio=img_meta["contour_area_ratio"],
+            laplacianVariance=img_meta["laplacian_variance"],
             deskewAngle=img_meta["deskew_angle"],
             isCropped=img_meta["is_cropped"],
+            qualityPassed=quality.passed,
+            qualityReasons=quality.reasons,
+            qualityMode=quality.mode.upper(),
             candidateDocumentType=candidate_info["candidateType"],
             candidateConfidence=candidate_info["confidence"]
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Lỗi xử lý OCR pipeline: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -82,8 +126,24 @@ async def preprocess_image_only(file: UploadFile = File(...)):
         if not content:
             raise HTTPException(status_code=400, detail="File tải lên rỗng")
 
-        processed_bytes, _ = ImagePreprocessor.process(content)
+        processed_bytes, img_meta = ImagePreprocessor.process(content)
+        quality = evaluate_quality(img_meta, _quality_config())
+        if not quality.passed and quality.mode == "enforce":
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "QUALITY_GATE_FAILED", "reasons": quality.reasons},
+            )
         _, cleaned_bytes = ImageCleaner.clean(processed_bytes)
         return Response(content=cleaned_bytes, media_type="image/jpeg")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/ocr/quality-metrics")
+async def quality_metrics():
+    """Bộ đếm in-process cho shadow mode — không ghi MariaDB."""
+    snap = metrics_snapshot(_quality_config())
+    snap["mode"] = settings.QUALITY_GATE_MODE
+    return snap
