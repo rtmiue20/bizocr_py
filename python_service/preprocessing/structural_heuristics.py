@@ -1,6 +1,8 @@
 import logging
 from typing import Dict, Any, List
 
+from python_service.config import settings
+
 logger = logging.getLogger(__name__)
 
 class StructuralHeuristics:
@@ -39,7 +41,7 @@ class StructuralHeuristics:
             }
 
         # 2. CANDIDATE: PAGE_DOCUMENT (A4: Hóa đơn, Hợp đồng, Phiếu thu...)
-        is_a4_ratio = 0.65 <= aspect_ratio <= 1.45
+        is_a4_ratio = settings.HEURISTIC_ASPECT_RATIO_A4_MIN <= aspect_ratio <= settings.HEURISTIC_ASPECT_RATIO_A4_MAX
         if is_a4_ratio or text_len >= 350 or box_count >= 25:
             logger.info(f"[Heuristic] Phát hiện candidate PAGE_DOCUMENT (Ratio: {aspect_ratio}, TextLen: {text_len}, Boxes: {box_count})")
             return {

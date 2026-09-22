@@ -124,7 +124,7 @@ class PaddleOcrEngine:
                 current_line_y = b["y_center"]
                 current_line_h = b["height"]
             else:
-                threshold = max(current_line_h, b["height"]) * 0.6
+                threshold = max(current_line_h, b["height"]) * settings.OCR_LINE_MERGE_THRESHOLD_RATIO
                 if abs(b["y_center"] - current_line_y) <= threshold:
                     current_line.append(b)
                     current_line_y = sum(x["y_center"] for x in current_line) / len(current_line)

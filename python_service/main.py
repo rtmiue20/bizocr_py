@@ -6,6 +6,7 @@ from python_service.config import settings
 from python_service.api.routes_ocr import router as ocr_router
 from python_service.api.routes_ml import router as ml_router
 from python_service.api.routes_search import router as search_router
+from python_service.api.routes_export import router as export_router
 
 
 # Thiết lập logging
@@ -34,6 +35,7 @@ app.add_middleware(
 app.include_router(ocr_router)
 app.include_router(ml_router)
 app.include_router(search_router)
+app.include_router(export_router)
 
 @app.get("/")
 @app.get("/health")

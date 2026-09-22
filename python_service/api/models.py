@@ -18,6 +18,8 @@ class OcrResponseDto(BaseModel):
     aspectRatioAfterCrop: Optional[float] = 0.0
     originalWidth: Optional[int] = 0
     originalHeight: Optional[int] = 0
+    originalWidth: Optional[int] = 0
+    originalHeight: Optional[int] = 0
     contourAreaRatio: Optional[float] = 0.0
     laplacianVariance: Optional[float] = 0.0
     meanBrightness: Optional[float] = 0.0
@@ -29,3 +31,5 @@ class OcrResponseDto(BaseModel):
     qualityMode: Optional[str] = "SHADOW"
     candidateDocumentType: Optional[str] = "UNKNOWN"
     candidateConfidence: Optional[float] = 0.0
+    # Thông tin công ty hợp nhất
+    companyInfo: Optional[dict] = None

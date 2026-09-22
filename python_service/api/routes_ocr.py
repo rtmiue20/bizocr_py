@@ -14,6 +14,7 @@ from python_service.preprocessing.quality_gate import (
 from python_service.preprocessing.structural_heuristics import StructuralHeuristics
 from python_service.ocr.paddle_ocr_engine import PaddleOcrEngine
 from python_service.normalizer.qwen_normalizer import QwenTextNormalizer
+from python_service.services.company_resolver import company_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,15 @@ async def process_ocr(
         if normalize_with_llm and raw_ocr_text and not should_skip_llm:
             final_text = await qwen_normalizer.normalize_text(raw_ocr_text)
 
+        # BƯỚC 3.5: Hợp nhất thông tin công ty (Nếu là Namecard hoặc có dấu hiệu công ty)
+        company_info = None
+        if candidate_info["candidateType"] in ["NAME_CARD", "PAGE_DOCUMENT"]:
+            # Giả định sơ bộ: lấy dòng đầu tiên hoặc dựa trên heuristics của qwen
+            # Trong thực tế Qwen có thể trích xuất JSON, ở đây ta gọi resolver để Java bớt việc
+            company_info = await company_resolver.resolve_company(
+                company_name=final_text.split("\n")[0] if final_text else ""
+            )
+
         formatted_boxes = [BoundingBoxDto(text=b["text"], points=b["points"]) for b in boxes]
 
         return OcrResponseDto(
@@ -110,7 +120,8 @@ async def process_ocr(
             qualityReasons=quality.reasons,
             qualityMode=quality.mode.upper(),
             candidateDocumentType=candidate_info["candidateType"],
-            candidateConfidence=candidate_info["confidence"]
+            candidateConfidence=candidate_info["confidence"],
+            companyInfo=company_info
         )
 
     except HTTPException:

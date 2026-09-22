@@ -41,5 +41,15 @@ class Settings(BaseModel):
         "QUALITY_GATE_REQUIRE_CROP", "false"
     ).lower() in ("true", "1", "t")
 
+    # OCR Thresholds
+    OCR_LINE_MERGE_THRESHOLD_RATIO: float = float(os.getenv("OCR_LINE_MERGE_THRESHOLD_RATIO", "0.6"))
+
+    # Document Heuristics
+    HEURISTIC_ASPECT_RATIO_A4_MIN: float = float(os.getenv("HEURISTIC_ASPECT_RATIO_A4_MIN", "0.65"))
+    HEURISTIC_ASPECT_RATIO_A4_MAX: float = float(os.getenv("HEURISTIC_ASPECT_RATIO_A4_MAX", "1.45"))
+
+    # Excel Export Template Path
+    EXCEL_TEMPLATE_PATH: str = os.getenv("EXCEL_TEMPLATE_PATH", "data/templates/export_template.xlsx")
+
 
 settings = Settings()
