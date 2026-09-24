@@ -82,14 +82,14 @@ async def process_ocr(
 
         # BƯỚC 3: Qwen LLM (Bỏ qua nếu candidate là Namecard để tiết kiệm tài nguyên)
         final_text = raw_ocr_text
-        should_skip_llm = candidate_info["candidateType"] == "NAME_CARD"
+        should_skip_llm = candidate_info["candidateType"] == "NAMECARD"
 
         if normalize_with_llm and raw_ocr_text and not should_skip_llm:
             final_text = await qwen_normalizer.normalize_text(raw_ocr_text)
 
         # BƯỚC 3.5: Hợp nhất thông tin công ty (Nếu là Namecard hoặc có dấu hiệu công ty)
         company_info = None
-        if candidate_info["candidateType"] in ["NAME_CARD", "PAGE_DOCUMENT"]:
+        if candidate_info["candidateType"] in ["NAMECARD", "PAGE_DOCUMENT"]:
             # Giả định sơ bộ: lấy dòng đầu tiên hoặc dựa trên heuristics của qwen
             # Trong thực tế Qwen có thể trích xuất JSON, ở đây ta gọi resolver để Java bớt việc
             company_info = await company_resolver.resolve_company(

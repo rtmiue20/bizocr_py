@@ -31,11 +31,11 @@ class StructuralHeuristics:
         is_short_text = text_len < 350
         is_few_boxes = box_count < 25
 
-        # 1. CANDIDATE: NAME_CARD
+        # 1. CANDIDATE: NAMECARD
         if is_namecard_ratio and is_short_text and is_few_boxes:
-            logger.info(f"[Heuristic] Phát hiện candidate NAME_CARD (Ratio: {aspect_ratio}, TextLen: {text_len}, Boxes: {box_count})")
+            logger.info(f"[Heuristic] Phát hiện candidate NAMECARD (Ratio: {aspect_ratio}, TextLen: {text_len}, Boxes: {box_count})")
             return {
-                "candidateType": "NAME_CARD",
+                "candidateType": "NAMECARD",
                 "confidence": 0.85,
                 "reason": "Aspect ratio namecard + văn bản ngắn + ít bounding boxes"
             }

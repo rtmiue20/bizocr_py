@@ -84,6 +84,7 @@ class ImagePreprocessor:
             aspect_ratio_after_crop=aspect_after,
             deskew_angle=round(float(angle), 2),
             is_cropped=True,
+            crop_failed=False,
             contour_area_ratio=contour_area_ratio,
             image_for_sharpness=cropped_img,
         )
@@ -106,6 +107,7 @@ class ImagePreprocessor:
             aspect_ratio_after_crop=aspect,
             deskew_angle=0.0,
             is_cropped=False,
+            crop_failed=True,
             contour_area_ratio=contour_area_ratio,
             image_for_sharpness=img,
         )
@@ -113,18 +115,18 @@ class ImagePreprocessor:
 
     @staticmethod
     def _metadata(
-        *,
-        width: int,
-        height: int,
-        original_width: int,
-        original_height: int,
-        aspect_ratio_after_crop: float,
-        deskew_angle: float,
-        is_cropped: bool,
-        contour_area_ratio: float,
-        image_for_sharpness: Optional[np.ndarray],
+            *,
+            width: int,
+            height: int,
+            original_width: int,
+            original_height: int,
+            aspect_ratio_after_crop: float,
+            deskew_angle: float,
+            is_cropped: bool,
+            crop_failed: bool,  # THÊM
+            contour_area_ratio: float,
+            image_for_sharpness: Optional[np.ndarray],
     ) -> Dict[str, Any]:
-        # aspect_ratio giữ tên cũ = tỉ lệ sau crop, Java cũ không gãy.
         return {
             "width": width,
             "height": height,
@@ -134,8 +136,10 @@ class ImagePreprocessor:
             "aspect_ratio_after_crop": aspect_ratio_after_crop,
             "deskew_angle": deskew_angle,
             "is_cropped": is_cropped,
+            "crop_failed": crop_failed,  # THÊM
             "contour_area_ratio": contour_area_ratio,
             "laplacian_variance": ImagePreprocessor._laplacian_variance(image_for_sharpness),
+            "mean_brightness": ImagePreprocessor._mean_brightness(image_for_sharpness),  # THÊM
         }
 
     @staticmethod
@@ -144,3 +148,10 @@ class ImagePreprocessor:
             return 0.0
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
         return round(float(cv2.Laplacian(gray, cv2.CV_64F).var()), 4)
+
+    @staticmethod
+    def _mean_brightness(image: Optional[np.ndarray]) -> float:
+        if image is None or image.size == 0:
+            return 0.0
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+        return round(float(cv2.mean(gray)[0]), 4)

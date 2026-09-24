@@ -32,7 +32,7 @@ class DocumentMlService:
             {"label": "CONTRACT", "text": "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM HỢP ĐỒNG KINH TẾ BÊN A BÊN B ĐIỀU KHOẢN NGHIỆM THU THANH TOÁN"},
             {"label": "BANK_STATEMENT", "text": "ỦY NHIỆM CHI SAO KÊ TÀI KHOẢN NGÂN HÀNG SỐ TÀI KHOẢN SỐ DƯ TÀI KHOẢN GIAO DỊCH CHUYỂN TIỀN"},
             {"label": "ID_CARD", "text": "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM CĂN CƯỚC CÔNG DÂN HỌ VÀ TÊN NGÀY SINH NƠI THƯỜNG TRÚ GIÁ TRỊ ĐẾN"},
-            {"label": "NAME_CARD", "text": "CARD VISIT GIÁM ĐỐC KINH DOANH EMAIL MOBILE PHONE TEL WEBSITE ADDRESS COMPANY"}
+            {"label": "NAMECARD", "text": "CARD VISIT GIÁM ĐỐC KINH DOANH EMAIL MOBILE PHONE TEL WEBSITE ADDRESS COMPANY"}
         ]
         
         self.collected_data.extend(default_samples)
