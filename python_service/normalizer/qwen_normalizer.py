@@ -2,7 +2,7 @@ import httpx
 import logging
 import re
 import unicodedata
-from python_service.config import settings
+from python_service.config import settings, detect_ollama_model
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ class QwenTextNormalizer:
 
     def __init__(self):
         self.ollama_url = f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/generate"
-        self.model_name = settings.OLLAMA_MODEL
+        self.model_name = detect_ollama_model(settings.OLLAMA_BASE_URL, settings.OLLAMA_MODEL)
         self.timeout = settings.OLLAMA_TIMEOUT_SECONDS
 
     @staticmethod
@@ -113,18 +113,74 @@ class QwenTextNormalizer:
                     f"Đang gửi OCR text ({len(preprocessed_text)} chars) tới Ollama model '{self.model_name}'...")
                 response = await client.post(self.ollama_url, json=payload)
 
+                # Nếu lỗi 404 do model tag (ví dụ qwen2.5:3b-instruct vs qwen2.5:3b)
+                if response.status_code == 404:
+                    alt_model = "qwen2.5:3b" if "instruct" in self.model_name else "qwen2.5:3b-instruct"
+                    logger.warning(f"Ollama trả về 404 cho '{self.model_name}'. Thử lại với tag thay thế '{alt_model}'...")
+                    payload["model"] = alt_model
+                    response = await client.post(self.ollama_url, json=payload)
+                    if response.status_code == 200:
+                        self.model_name = alt_model
+
                 if response.status_code == 200:
                     data = response.json()
                     normalized = data.get("response", "").strip()
                     if normalized:
-                        # Làm sạch markdown nếu LLM tự chèn
                         clean_text = re.sub(r"^```[a-zA-Z]*\n", "", normalized)
                         clean_text = re.sub(r"\n```$", "", clean_text).strip()
-                        logger.info("Chuẩn hóa văn bản thành công bằng Qwen2.5:3B!")
+                        logger.info(f"Chuẩn hóa văn bản thành công bằng Qwen2.5 ({self.model_name})!")
                         return clean_text
                 else:
                     logger.warning(f"Ollama trả về status {response.status_code}: {response.text}")
         except Exception as e:
             logger.warning(f"Không thể kết nối tới Ollama ({e}). Sử dụng Rule-based Normalization fallback.")
+
+        return self.rule_based_fallback_clean(preprocessed_text)
+
+    async def normalize_namecard(self, raw_ocr_text: str) -> str:
+        """
+        Chuẩn hóa văn bản danh thiếp (namecard): phục hồi dấu câu, ngắt dòng các thực thể
+        (Tên công ty, Họ tên, Chức vụ, SĐT, Email, Website, Địa chỉ).
+        """
+        if not raw_ocr_text or len(raw_ocr_text.strip()) < 5:
+            return raw_ocr_text or ""
+
+        preprocessed_text = self.fix_broken_emails(raw_ocr_text)
+
+        system_prompt = (
+            "Bạn là trợ lý AI chuyên chuẩn hóa văn bản danh thiếp (namecard/business card) tiếng Việt.\n"
+            "Nhiệm vụ: Sửa lỗi chính tả do OCR quét sai, giữ nguyên số điện thoại, email, địa chỉ web.\n"
+            "Sắp xếp mỗi thực thể trên một dòng rõ ràng (Tên công ty, Họ tên cá nhân, Chức danh, Số điện thoại, Email, Website, Địa chỉ).\n"
+            "Không thêm lời bình luận, không bọc markdown code block."
+        )
+
+        user_content = f"Văn bản OCR danh thiếp:\n\"\"\"\n{preprocessed_text}\n\"\"\""
+        prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_content}<|im_end|>\n<|im_start|>assistant\n"
+
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.0, "num_predict": 1024}
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                res = await client.post(self.ollama_url, json=payload)
+                if res.status_code == 404:
+                    alt = "qwen2.5:3b" if "instruct" in self.model_name else "qwen2.5:3b-instruct"
+                    payload["model"] = alt
+                    res = await client.post(self.ollama_url, json=payload)
+                    if res.status_code == 200:
+                        self.model_name = alt
+
+                if res.status_code == 200:
+                    text_out = res.json().get("response", "").strip()
+                    if text_out:
+                        clean = re.sub(r"^```[a-zA-Z]*\n", "", text_out)
+                        clean = re.sub(r"\n```$", "", clean).strip()
+                        return clean
+        except Exception as e:
+            logger.warning(f"Ollama normalize_namecard fallback: {e}")
 
         return self.rule_based_fallback_clean(preprocessed_text)

@@ -5,6 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$/bizocr-step0-baseline/step0-baseline/camera_source" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/bizocr-step0-baseline/step0-baseline/java/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/python_service" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.11 (bizocr_py)" jdkType="Python SDK" />

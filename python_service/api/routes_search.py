@@ -11,14 +11,21 @@ Gọi bởi: com.company.bizocr.service.ExternalTaxSearchService (Java)
 
 import logging
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+from python_service.ml.embedding_service import embedding_service
+from python_service.api.models import (
+    SemanticSearchRequest,
+    SemanticSearchResponse,
+    SemanticSearchItem,
+)
 
 logger = logging.getLogger("python_service.search.duckduckgo_search")
 
-router = APIRouter(prefix="/api", tags=["tax-search"])
+router = APIRouter(prefix="/api", tags=["search"])
 
 # --- Cấu hình tìm kiếm --------------------------------------------------
 
@@ -107,6 +114,46 @@ def tax_search(payload: TaxSearchRequest) -> TaxSearchResponse:
         industryCodes=industry_codes,
         source="duckduckgo",
         matchedUrl=matched_url,
+    )
+
+
+@router.post("/search/semantic", response_model=SemanticSearchResponse)
+@router.post("/v1/search/semantic", response_model=SemanticSearchResponse)
+@router.post("/semantic-search", response_model=SemanticSearchResponse)
+def semantic_card_search(payload: SemanticSearchRequest) -> SemanticSearchResponse:
+    """
+    Tìm kiếm danh thiếp theo ngữ nghĩa (Semantic Search).
+    Nhận diện các truy vấn ngôn ngữ tự nhiên: 'công ty xây dựng', 'logistics', 'xưởng in ấn'...
+    """
+    query = (payload.query or "").strip()
+    if not query:
+        return SemanticSearchResponse(query="", results=[], total=0)
+
+    candidates = payload.candidateCards or []
+    top_k = payload.topK or 10
+
+    ranked = embedding_service.semantic_search(
+        query=query,
+        candidate_cards=candidates,
+        top_k=top_k,
+    )
+
+    items = [
+        SemanticSearchItem(
+            cardId=item.get("cardId"),
+            score=item.get("score", 0.0),
+            company=item.get("company"),
+            name=item.get("name"),
+            industry=item.get("industry"),
+            matchedSnippet=item.get("matchedSnippet"),
+        )
+        for item in ranked
+    ]
+
+    return SemanticSearchResponse(
+        query=query,
+        results=items,
+        total=len(items),
     )
 
 

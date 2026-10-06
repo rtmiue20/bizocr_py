@@ -7,10 +7,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional
 
 try:
     from training_pipeline.pipeline_common import (
@@ -28,6 +29,27 @@ except ImportError:
         utc_now,
         validate_schema,
     )
+
+
+# Danh sách các trường BẮT BUỘC theo loại tài liệu (Dùng làm dự phòng khi Schema không khai báo 'required')
+REQUIRED_FIELDS_BY_DOC_TYPE: dict[str, list[str]] = {
+    "NAMECARD": ["name"],
+    "BUSINESS_CARD": ["name"],
+    "CARD": ["name"],
+    "INVOICE": ["invoice_number", "total_amount", "invoice_date"],
+    "RECEIPT": ["total_amount", "date"],
+    "ID_CARD": ["id_number", "full_name"],
+}
+
+
+def _normalize_for_grounding(text: str) -> str:
+    """
+    Chuẩn hóa chuỗi văn bản phục vụ so sánh grounding:
+    Loại bỏ khoảng trắng, dấu câu, gạch nối, gạch chéo, ngắt dòng và chuyển về chữ thường.
+    """
+    if not text:
+        return ""
+    return re.sub(r"[\s\.\-\(\)/,:\n\r\t]+", "", str(text).lower())
 
 
 @dataclass
@@ -55,23 +77,39 @@ class InferenceGuardrail:
         self.schema_dir = schema_dir
 
     def active_manifest(self) -> dict[str, Any] | None:
-        manifest_path = self.active_root / "production_manifest.json"
-        if not manifest_path.exists():
-            return None
-        manifest = read_json(manifest_path)
-        if manifest.get("status") != "ACTIVE":
-            raise RuntimeError("Active model manifest is not ACTIVE")
-        return manifest
+        """
+        FIX 1: Đọc linh hoạt từ production_manifest.json hoặc classifier_manifest.json
+        để tương thích với luồng xuất manifest của classifier_ml.py.
+        """
+        for name in ["production_manifest.json", "classifier_manifest.json"]:
+            p = self.active_root / name
+            if p.exists():
+                manifest = read_json(p)
+                if manifest.get("status") == "ACTIVE":
+                    return manifest
+                return manifest
+        return None
 
     @staticmethod
     def _business_errors(value: dict[str, Any]) -> list[str]:
         errors: list[str] = []
-        # Conservative generic checks; document-specific rules belong in JSON
-        # Schema or a separate validator, not in this generic helper.
         for key in ("total_amount", "subtotal", "tax_amount", "quantity"):
             if key in value and isinstance(value[key], (int, float)) and value[key] < 0:
                 errors.append(f"{key} must not be negative")
         return errors
+
+    def _get_required_fields(
+        self, schema: Optional[dict[str, Any]], document_type: str, fallback_keys: list[str]
+    ) -> list[str]:
+        """Xác định danh sách các trường BẮT BUỘC của loại tài liệu."""
+        if schema and isinstance(schema.get("required"), list) and schema.get("required"):
+            return schema["required"]
+
+        doc_type_upper = document_type.upper() if document_type else ""
+        if doc_type_upper in REQUIRED_FIELDS_BY_DOC_TYPE:
+            return REQUIRED_FIELDS_BY_DOC_TYPE[doc_type_upper]
+
+        return fallback_keys
 
     def validate_and_clean_json(
         self,
@@ -126,12 +164,11 @@ class InferenceGuardrail:
     ) -> dict[str, Any]:
         """
         Xử lý BƯỚC 5 (Hybrid Extraction & Guardrail):
-        1. Tính Completeness score của Regex/Heuristics.
-        2. Nếu đủ 100% -> Trả về ACCEPTED (Không gọi LLM).
-        3. Nếu thiếu -> Gọi Ollama có điều kiện (chỉ truyền danh sách các trường rỗng).
-        4. Kiểm tra Grounding: Ép chuỗi LLM trả về phải xuất hiện trong raw_ocr_text.
-        5. Gắn nguồn 'LLM_OLLAMA' và trạng thái grounded: True/False.
-        6. Nếu có can thiệp của LLM -> Khóa cứng trạng thái ở NEEDS_REVIEW.
+        1. Tính Completeness score dựa trên các trường BẮT BUỘC.
+        2. Nếu đủ 100% trường bắt buộc -> Trả về ACCEPTED (Không gọi LLM).
+        3. Nếu thiếu trường bắt buộc -> Gọi Ollama trích xuất CHỈ CÁC TRƯỜNG BẮT BUỘC RỖNG.
+        4. Grounding Check: So sánh chuỗi đã qua chuẩn hóa dấu câu/khoảng trắng.
+        5. Nếu tất cả dữ liệu trích xuất hợp lệ và grounded -> Trả về kết quả phù hợp.
         """
         manifest = self.active_manifest()
         model_version = manifest.get("active_version") if manifest else "HYBRID_REGEX_OLLAMA"
@@ -146,42 +183,43 @@ class InferenceGuardrail:
             "checked_at": utc_now(),
         }
 
-        # 1. Tính Completeness Score
-        total_fields = len(regex_extracted)
-        filled_fields = sum(
-            1 for v in regex_extracted.values()
-            if v is not None and str(v).strip() != ""
-        )
-        completeness_score = round(filled_fields / total_fields, 4) if total_fields else 0.0
+        # 1. Xác định tập các trường BẮT BUỘC và tính Completeness Score
+        required_keys = self._get_required_fields(schema, document_type, list(regex_extracted.keys()))
 
-        # Khởi tạo danh sách kết quả với nguồn Regex
+        filled_required = sum(
+            1 for k in required_keys
+            if k in regex_extracted and regex_extracted[k] is not None and str(regex_extracted[k]).strip() != ""
+        )
+        completeness_score = round(filled_required / len(required_keys), 4) if required_keys else 1.0
+
+        # Khởi tạo dict lưu kết quả entities
         final_entities: dict[str, Any] = {}
         for k, v in regex_extracted.items():
             has_val = v is not None and str(v).strip() != ""
             final_entities[k] = {
                 "value": str(v).strip() if has_val else None,
                 "source": "REGEX_HEURISTICS" if has_val else None,
-                "grounded": True if has_val else False
+                "grounded": True if has_val else False,
             }
 
-        # Nếu Regex đã tìm đủ 100% -> Chấp nhận luôn (ACCEPTED)
+        # Nếu Regex đã tìm đủ 100% các trường bắt buộc -> Chấp nhận luôn (ACCEPTED - Bỏ qua Ollama)
         if completeness_score >= 1.0:
             return GuardrailResult(
                 status="ACCEPTED",
                 data={
                     "entities": final_entities,
                     "completenessScore": 1.0,
-                    "llmInvoked": False
+                    "llmInvoked": False,
                 },
                 reason=None,
                 errors=[],
-                **base_meta
+                **base_meta,
             ).as_dict()
 
-        # 2. Xác định các trường còn thiếu để gọi Ollama
+        # 2. FIX 2: CHỈ lấy các trường BẮT BUỘC bị thiếu/rỗng để hỏi Ollama (Bỏ qua trường Optional)
         missing_keys = [
-            k for k, v in regex_extracted.items()
-            if v is None or str(v).strip() == ""
+            k for k in required_keys
+            if k not in regex_extracted or regex_extracted[k] is None or str(regex_extracted[k]).strip() == ""
         ]
 
         if not ollama_client_func:
@@ -190,14 +228,14 @@ class InferenceGuardrail:
                 data={
                     "entities": final_entities,
                     "completenessScore": completeness_score,
-                    "llmInvoked": False
+                    "llmInvoked": False,
                 },
                 reason="MISSING_FIELDS_NO_LLM_CLIENT",
-                errors=[f"Thiếu các trường {missing_keys} nhưng không tìm thấy llm_client_func."],
-                **base_meta
+                errors=[f"Thiếu các trường bắt buộc {missing_keys} nhưng không tìm thấy llm_client_func."],
+                **base_meta,
             ).as_dict()
 
-        # 3. Gọi Ollama trích xuất riêng các trường thiếu
+        # 3. Gọi Ollama trích xuất chỉ những trường bắt buộc còn thiếu
         try:
             llm_output = ollama_client_func(raw_ocr_text, missing_keys) or {}
         except Exception as exc:
@@ -206,28 +244,30 @@ class InferenceGuardrail:
                 data={
                     "entities": final_entities,
                     "completenessScore": completeness_score,
-                    "llmInvoked": True
+                    "llmInvoked": True,
                 },
                 reason="LLM_EXECUTION_FAILED",
                 errors=[f"Lỗi khi thực thi Ollama: {str(exc)}"],
-                **base_meta
+                **base_meta,
             ).as_dict()
 
         grounding_errors: list[str] = []
-        raw_text_lower = raw_ocr_text.lower()
+        norm_raw_text = _normalize_for_grounding(raw_ocr_text)
 
-        # 4. Điền trường thiếu + Grounding check
+        # 4. Điền trường thiếu & Kiểm tra Grounding
         for key in missing_keys:
             val = llm_output.get(key)
             if val is not None and str(val).strip() != "":
                 val_str = str(val).strip()
-                # Grounding: Chuỗi LLM trả về bắt buộc phải có trong văn bản gốc OCR
-                is_grounded = val_str.lower() in raw_text_lower
+                norm_val = _normalize_for_grounding(val_str)
+
+                # Grounding: Chuỗi LLM sau khi loại bỏ khoảng trắng/dấu câu phải xuất hiện trong OCR gốc
+                is_grounded = bool(norm_val) and (norm_val in norm_raw_text)
 
                 final_entities[key] = {
                     "value": val_str,
                     "source": "LLM_OLLAMA",
-                    "grounded": is_grounded
+                    "grounded": is_grounded,
                 }
 
                 if not is_grounded:
@@ -235,17 +275,17 @@ class InferenceGuardrail:
                         f"Trường '{key}'='{val_str}' do LLM trả về không khớp với văn bản OCR gốc (Grounding Failed)."
                     )
 
-        # 5. Có sự can thiệp của LLM -> Bắt buộc khóa ở trạng thái NEEDS_REVIEW
+        # 5. Có sự can thiệp của LLM -> Chuyển về trạng thái NEEDS_REVIEW để con người xác nhận
         return GuardrailResult(
             status="NEEDS_REVIEW",
             data={
                 "entities": final_entities,
                 "completenessScore": completeness_score,
-                "llmInvoked": True
+                "llmInvoked": True,
             },
             reason="LLM_INVOKED_FOR_MISSING_FIELDS" if not grounding_errors else "GROUNDING_VALIDATION_FAILED",
             errors=grounding_errors,
-            **base_meta
+            **base_meta,
         ).as_dict()
 
 

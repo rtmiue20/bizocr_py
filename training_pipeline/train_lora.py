@@ -1,5 +1,5 @@
 """Train a LoRA adapter from an explicit, validated dataset version.
-This script uses Transformers + PEFT.  It saves an adapter candidate and a
+This script uses Transformers + PEFT. It saves an adapter candidate and a
 manifest; it does not change the active production model.
 """
 from __future__ import annotations
@@ -14,6 +14,17 @@ try:
 except ImportError:
     from pipeline_common import sha256_file, sha256_jsonl, utc_now, write_json_atomic
 
+# Framework prompt chuẩn đồng bộ với prompt Java gửi cho Ollama ở môi trường production
+OLLAMA_SYSTEM_PROMPT = (
+    "Bạn là trợ lý AI chuyên môn phân tích và trích xuất dữ liệu từ văn bản OCR.\n"
+    "Nhiệm vụ của bạn là đọc văn bản OCR đầu vào và chuyển đổi thành một đối tượng JSON hợp lệ duy nhất.\n"
+    "Yêu cầu:\n"
+    "1. Bắt buộc trả về định dạng JSON hợp lệ tuân thủ khung mẫu được yêu cầu.\n"
+    "2. Lọc bỏ các thông tin nhiễu, ký tự lỗi OCR và không suy đoán thông tin không có trong văn bản.\n"
+    "3. Chỉ xuất dữ liệu JSON, không kèm thêm lời giải thích hoặc mã Markdown dư thừa."
+)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, required=True)
@@ -23,9 +34,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Explicit candidate directory name. Must be unique for each run.",
     )
+    # Cập nhật base model mặc định lên 3B để tương thích với Ollama runtime
     parser.add_argument(
         "--base-model",
-        default=os.getenv("BASE_MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct"),
+        default=os.getenv("BASE_MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct"),
+        help="Base model for LoRA training (default matches Ollama 3B production model)",
     )
     parser.add_argument("--rank", type=int, default=16)
     parser.add_argument("--alpha", type=int, default=32)
@@ -38,6 +51,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--load-in-4bit", action="store_true")
     return parser.parse_args()
+
+
 def load_dependencies():
     try:
         import torch
@@ -51,7 +66,7 @@ def load_dependencies():
         from transformers import (
             AutoModelForCausalLM,
             AutoTokenizer,
-            DataCollatorForLanguageModeling,
+            DataCollatorForSeq2Seq,
             EarlyStoppingCallback,
             Trainer,
             TrainingArguments,
@@ -62,24 +77,73 @@ def load_dependencies():
             "peft, accelerate and torch."
         ) from exc
     return locals()
-def format_record(tokenizer, record: dict) -> str:
-    messages = [
-        {"role": "system", "content": str(record["instruction"])},
+
+
+def build_chat_messages(record: dict) -> tuple[list[dict], list[dict]]:
+    """
+    Xây dựng cấu trúc prompt đồng bộ với Java/Ollama runtime.
+    Trả về (prompt_messages, full_messages).
+    """
+    instruction = str(record.get("instruction", "")).strip()
+    if not instruction or len(instruction) < 20:
+        instruction = OLLAMA_SYSTEM_PROMPT
+
+    prompt_messages = [
+        {"role": "system", "content": instruction},
         {"role": "user", "content": str(record["input"])},
-        {
-            "role": "assistant",
-            "content": json.dumps(record["output"], ensure_ascii=False, sort_keys=True),
-        },
     ]
-    if hasattr(tokenizer, "apply_chat_template"):
-        return tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
-        )
-    return (
-        f"System:\n{messages[0]['content']}\n"
-        f"User:\n{messages[1]['content']}\n"
-        f"Assistant:\n{messages[2]['content']}"
+
+    output_str = (
+        json.dumps(record["output"], ensure_ascii=False, sort_keys=True)
+        if isinstance(record["output"], dict)
+        else str(record["output"])
     )
+
+    full_messages = prompt_messages + [
+        {"role": "assistant", "content": output_str}
+    ]
+
+    return prompt_messages, full_messages
+
+
+def prepare_sample(tokenizer, record: dict, max_length: int) -> dict:
+    """
+    Định dạng mẫu dữ liệu và MASK phần prompt bằng labels = -100
+    để chỉ tính loss trên phần response JSON đầu ra.
+    """
+    prompt_messages, full_messages = build_chat_messages(record)
+
+    if hasattr(tokenizer, "apply_chat_template"):
+        prompt_text = tokenizer.apply_chat_template(
+            prompt_messages, tokenize=False, add_generation_prompt=True
+        )
+        full_text = tokenizer.apply_chat_template(
+            full_messages, tokenize=False, add_generation_prompt=False
+        )
+    else:
+        prompt_text = f"System:\n{prompt_messages[0]['content']}\nUser:\n{prompt_messages[1]['content']}\nAssistant:\n"
+        full_text = f"{prompt_text}{full_messages[2]['content']}"
+
+    prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+    full_ids = tokenizer.encode(full_text, add_special_tokens=False)
+
+    if tokenizer.eos_token_id and (not full_ids or full_ids[-1] != tokenizer.eos_token_id):
+        full_ids.append(tokenizer.eos_token_id)
+
+    if len(full_ids) > max_length:
+        full_ids = full_ids[:max_length]
+
+    # Mask toàn bộ token thuộc prompt bằng -100
+    prompt_len = min(len(prompt_ids), len(full_ids))
+    labels = [-100] * prompt_len + full_ids[prompt_len:]
+
+    return {
+        "input_ids": full_ids,
+        "attention_mask": [1] * len(full_ids),
+        "labels": labels,
+    }
+
+
 def load_records(path: Path) -> list[dict]:
     records = []
     with path.open("r", encoding="utf-8") as handle:
@@ -92,6 +156,8 @@ def load_records(path: Path) -> list[dict]:
     if not records:
         raise ValueError(f"Dataset is empty: {path}")
     return records
+
+
 def train(args: argparse.Namespace) -> Path:
     if not args.dataset.is_dir():
         raise FileNotFoundError(args.dataset)
@@ -101,6 +167,7 @@ def train(args: argparse.Namespace) -> Path:
     for required in (train_file, val_file, split_manifest):
         if not required.exists():
             raise FileNotFoundError(f"Missing required file: {required}")
+
     deps = load_dependencies()
     torch = deps["torch"]
     Dataset = deps["Dataset"]
@@ -110,32 +177,30 @@ def train(args: argparse.Namespace) -> Path:
     prepare_model_for_kbit_training = deps["prepare_model_for_kbit_training"]
     AutoModelForCausalLM = deps["AutoModelForCausalLM"]
     AutoTokenizer = deps["AutoTokenizer"]
-    DataCollatorForLanguageModeling = deps["DataCollatorForLanguageModeling"]
+    DataCollatorForSeq2Seq = deps["DataCollatorForSeq2Seq"]
     EarlyStoppingCallback = deps["EarlyStoppingCallback"]
     Trainer = deps["Trainer"]
     TrainingArguments = deps["TrainingArguments"]
+
     train_records = load_records(train_file)
     val_records = load_records(val_file)
+
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    train_texts = [format_record(tokenizer, record) for record in train_records]
-    val_texts = [format_record(tokenizer, record) for record in val_records]
-    train_dataset = Dataset.from_dict({"text": train_texts})
-    val_dataset = Dataset.from_dict({"text": val_texts})
-    def tokenize(batch):
-        return tokenizer(
-            batch["text"],
-            truncation=True,
-            max_length=args.max_length,
-            padding=False,
-        )
-    train_tokens = train_dataset.map(tokenize, batched=True, remove_columns=["text"])
-    val_tokens = val_dataset.map(tokenize, batched=True, remove_columns=["text"])
+
+    # Tokenize và che loss cho prompt (-100)
+    train_samples = [prepare_sample(tokenizer, rec, args.max_length) for rec in train_records]
+    val_samples = [prepare_sample(tokenizer, rec, args.max_length) for rec in val_records]
+
+    train_dataset = Dataset.from_list(train_samples)
+    val_dataset = Dataset.from_list(val_samples)
+
     use_4bit = args.load_in_4bit and torch.cuda.is_available()
     model_kwargs = {"trust_remote_code": True}
     if torch.cuda.is_available():
         model_kwargs["torch_dtype"] = torch.float16
+
     if use_4bit:
         try:
             from transformers import BitsAndBytesConfig
@@ -147,9 +212,11 @@ def train(args: argparse.Namespace) -> Path:
             )
         except ImportError as exc:
             raise RuntimeError("--load-in-4bit requires bitsandbytes") from exc
+
     model = AutoModelForCausalLM.from_pretrained(args.base_model, **model_kwargs)
     if use_4bit:
         model = prepare_model_for_kbit_training(model)
+
     peft_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=args.rank,
@@ -167,6 +234,7 @@ def train(args: argparse.Namespace) -> Path:
     )
     output_dir = args.output_root / version
     output_dir.mkdir(parents=True, exist_ok=False)
+
     training_args_kwargs = dict(
         output_dir=str(output_dir / "checkpoints"),
         per_device_train_batch_size=args.batch_size,
@@ -185,26 +253,39 @@ def train(args: argparse.Namespace) -> Path:
         metric_for_best_model="eval_loss",
         greater_is_better=False,
     )
-    # Transformers renamed this argument in newer releases.
+
     import inspect
     if "eval_strategy" in inspect.signature(TrainingArguments.__init__).parameters:
         training_args_kwargs["eval_strategy"] = "epoch"
     else:
         training_args_kwargs["evaluation_strategy"] = "epoch"
+
     training_args = TrainingArguments(**training_args_kwargs)
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
+    # Sử dụng DataCollatorForSeq2Seq để padding chính xác cả input_ids và labels (-100)
+    collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        pad_to_multiple_of=8,
+        return_tensors="pt",
+        padding=True,
+        label_pad_token_id=-100,
+    )
+
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=train_tokens,
-        eval_dataset=val_tokens,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
         data_collator=collator,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
     )
+
     trainer.train()
+
     adapter_dir = output_dir / "adapter"
     model.save_pretrained(adapter_dir)
     tokenizer.save_pretrained(adapter_dir)
+
     adapter_files = sorted(
         str(path.relative_to(adapter_dir))
         for path in adapter_dir.rglob("*")
@@ -213,15 +294,13 @@ def train(args: argparse.Namespace) -> Path:
     file_hashes = {
         name: sha256_file(adapter_dir / name) for name in adapter_files
     }
+
     manifest = {
         "candidate_version": version,
         "base_model": args.base_model,
         "dataset_version": args.dataset.name,
         "dataset_source_sha256": sha256_jsonl(train_file),
         "trained_at": utc_now(),
-        # Relative to candidate_dir so the candidate is portable between
-        # machines and can be verified by evaluate/register without path
-        # concatenation bugs.
         "adapter_path": "adapter",
         "adapter_files": file_hashes,
         "hyperparameters": {
@@ -239,6 +318,8 @@ def train(args: argparse.Namespace) -> Path:
     write_json_atomic(output_dir / "candidate_manifest.json", manifest)
     print(f"Candidate adapter saved to {output_dir}")
     return output_dir
+
+
 def main() -> int:
     try:
         train(parse_args())
@@ -246,5 +327,7 @@ def main() -> int:
     except Exception as exc:
         print(f"TRAINING_FAILED: {exc}", file=sys.stderr)
         return 1
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

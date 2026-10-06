@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from typing import Tuple, Dict, Any, Optional
+from python_service.preprocessing.qr_reader import QrReader
 
 
 class ImagePreprocessor:
@@ -76,6 +77,10 @@ class ImagePreprocessor:
         aspect_after = round(final_w / float(final_h), 4)
         _, buffer = cv2.imencode(".jpg", cropped_img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
 
+        qr_res = QrReader.read_qr(cropped_img)
+        if not qr_res.has_qr:
+            qr_res = QrReader.read_qr(img)
+
         metadata = ImagePreprocessor._metadata(
             width=final_w,
             height=final_h,
@@ -87,6 +92,7 @@ class ImagePreprocessor:
             crop_failed=False,
             contour_area_ratio=contour_area_ratio,
             image_for_sharpness=cropped_img,
+            qr_result=qr_res.to_dict() if qr_res.has_qr else None,
         )
         return buffer.tobytes(), metadata
 
@@ -99,6 +105,7 @@ class ImagePreprocessor:
         contour_area_ratio: float,
     ) -> Tuple[bytes, Dict[str, Any]]:
         aspect = round(width / float(height), 4) if height else 0.0
+        qr_res = QrReader.read_qr(img)
         metadata = ImagePreprocessor._metadata(
             width=width,
             height=height,
@@ -110,6 +117,7 @@ class ImagePreprocessor:
             crop_failed=True,
             contour_area_ratio=contour_area_ratio,
             image_for_sharpness=img,
+            qr_result=qr_res.to_dict() if qr_res.has_qr else None,
         )
         return image_bytes, metadata
 
@@ -123,9 +131,10 @@ class ImagePreprocessor:
             aspect_ratio_after_crop: float,
             deskew_angle: float,
             is_cropped: bool,
-            crop_failed: bool,  # THÊM
+            crop_failed: bool,
             contour_area_ratio: float,
             image_for_sharpness: Optional[np.ndarray],
+            qr_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return {
             "width": width,
@@ -136,10 +145,11 @@ class ImagePreprocessor:
             "aspect_ratio_after_crop": aspect_ratio_after_crop,
             "deskew_angle": deskew_angle,
             "is_cropped": is_cropped,
-            "crop_failed": crop_failed,  # THÊM
+            "crop_failed": crop_failed,
             "contour_area_ratio": contour_area_ratio,
             "laplacian_variance": ImagePreprocessor._laplacian_variance(image_for_sharpness),
-            "mean_brightness": ImagePreprocessor._mean_brightness(image_for_sharpness),  # THÊM
+            "mean_brightness": ImagePreprocessor._mean_brightness(image_for_sharpness),
+            "qr_result": qr_result,
         }
 
     @staticmethod

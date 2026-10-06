@@ -2,7 +2,7 @@ import logging
 from fastapi import APIRouter, File, UploadFile, HTTPException, Query
 from fastapi.responses import Response
 
-from python_service.api.models import OcrResponseDto, BoundingBoxDto
+from python_service.api.models import OcrResponseDto, BoundingBoxDto, QrResultDto, DedupResultDto
 from python_service.config import settings
 from python_service.preprocessing.image_preprocessor import ImagePreprocessor
 from python_service.preprocessing.image_cleaner import ImageCleaner
@@ -15,6 +15,9 @@ from python_service.preprocessing.structural_heuristics import StructuralHeurist
 from python_service.ocr.paddle_ocr_engine import PaddleOcrEngine
 from python_service.normalizer.qwen_normalizer import QwenTextNormalizer
 from python_service.services.company_resolver import company_resolver
+from python_service.ml.namecard_field_tagger import namecard_tagger
+from python_service.ml.industry_classifier import industry_classifier
+from python_service.services.dedup import dedup_service, ImageHasher
 
 logger = logging.getLogger(__name__)
 
@@ -80,21 +83,56 @@ async def process_ocr(
             boxes=boxes
         )
 
-        # BƯỚC 3: Qwen LLM (Bỏ qua nếu candidate là Namecard để tiết kiệm tài nguyên)
+        is_namecard = candidate_info["candidateType"] in ["NAMECARD", "CARD", "BUSINESS_CARD"] or (0.5 <= img_meta["aspect_ratio"] <= 2.2)
+
+        # BƯỚC 3: Chuẩn hóa LLM
         final_text = raw_ocr_text
-        should_skip_llm = candidate_info["candidateType"] == "NAMECARD"
+        if normalize_with_llm and raw_ocr_text:
+            if is_namecard:
+                final_text = await qwen_normalizer.normalize_namecard(raw_ocr_text)
+            else:
+                final_text = await qwen_normalizer.normalize_text(raw_ocr_text)
 
-        if normalize_with_llm and raw_ocr_text and not should_skip_llm:
-            final_text = await qwen_normalizer.normalize_text(raw_ocr_text)
+        # BƯỚC 4: Bóc tách thực thể Namecard (Nếu là Namecard hoặc có dấu hiệu thẻ)
+        qr_info = img_meta.get("qr_result")
+        qr_dto = QrResultDto(**qr_info) if qr_info else None
+        extracted_fields_data = None
+        dedup_dto = None
 
-        # BƯỚC 3.5: Hợp nhất thông tin công ty (Nếu là Namecard hoặc có dấu hiệu công ty)
-        company_info = None
-        if candidate_info["candidateType"] in ["NAMECARD", "PAGE_DOCUMENT"]:
-            # Giả định sơ bộ: lấy dòng đầu tiên hoặc dựa trên heuristics của qwen
-            # Trong thực tế Qwen có thể trích xuất JSON, ở đây ta gọi resolver để Java bớt việc
-            company_info = await company_resolver.resolve_company(
-                company_name=final_text.split("\n")[0] if final_text else ""
+        if is_namecard or qr_info:
+            qr_vcard = qr_info.get("vcardData") if qr_info else None
+            tag_result = await namecard_tagger.tag_fields(
+                raw_text=final_text or raw_ocr_text,
+                qr_vcard=qr_vcard,
             )
+            extracted_fields = tag_result.get("extractedFields", {})
+
+            # Phân loại ngành nghề từ Tên công ty
+            comp_name = extracted_fields.get("company")
+            if comp_name:
+                ind_res = industry_classifier.predict_industry(comp_name, text_snippet=final_text)
+                extracted_fields["industry"] = ind_res.get("industry")
+                extracted_fields["industryCode"] = ind_res.get("industryCode")
+                extracted_fields["industryConfidence"] = ind_res.get("confidence")
+
+            extracted_fields_data = extracted_fields
+
+            # Kiểm tra thẻ trùng lặp (Dedup)
+            img_hash = ImageHasher.dhash(processed_bytes)
+            dup_res = dedup_service.check_duplicate(
+                image_hash=img_hash,
+                phones=extracted_fields.get("phones"),
+                emails=extracted_fields.get("emails"),
+                company=extracted_fields.get("company"),
+                name=extracted_fields.get("name"),
+            )
+            dedup_dto = DedupResultDto(**dup_res)
+
+        # BƯỚC 4.5: Hợp nhất thông tin công ty qua DuckDuckGo / CompanyResolver
+        company_info = None
+        company_target = (extracted_fields_data.get("company") if extracted_fields_data else None) or (final_text.split("\n")[0] if final_text else "")
+        if company_target and len(company_target) > 5:
+            company_info = await company_resolver.resolve_company(company_name=company_target)
 
         formatted_boxes = [BoundingBoxDto(text=b["text"], points=b["points"]) for b in boxes]
 
@@ -104,7 +142,7 @@ async def process_ocr(
             confidence=round(confidence, 4),
             boxes=formatted_boxes,
             engine=engine_name,
-            normalized=(normalize_with_llm and not should_skip_llm),
+            normalized=normalize_with_llm,
             width=img_meta["width"],
             height=img_meta["height"],
             aspectRatio=img_meta["aspect_ratio"],
@@ -119,9 +157,12 @@ async def process_ocr(
             qualityPassed=quality.passed,
             qualityReasons=quality.reasons,
             qualityMode=quality.mode.upper(),
-            candidateDocumentType=candidate_info["candidateType"],
+            candidateDocumentType="NAMECARD" if is_namecard else candidate_info["candidateType"],
             candidateConfidence=candidate_info["confidence"],
-            companyInfo=company_info
+            companyInfo=company_info,
+            qrResult=qr_dto,
+            extractedFields=extracted_fields_data,
+            dedupInfo=dedup_dto,
         )
 
     except HTTPException:
