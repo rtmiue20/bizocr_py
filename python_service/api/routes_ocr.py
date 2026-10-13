@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from fastapi import APIRouter, File, UploadFile, HTTPException, Query
 from fastapi.responses import Response
@@ -70,11 +71,23 @@ async def process_ocr(
                 },
             )
 
-        # BƯỚC 1: Làm sạch ảnh
-        cleaned_img, _ = ImageCleaner.clean(processed_bytes)
+        # BƯỚC 1: Làm sạch ảnh (Tối ưu: dùng trực tiếp mảng ảnh từ RAM, tránh decode lại JPEG)
+        img_array = img_meta.pop("_image_array", None)
+        cleaned_img, _ = ImageCleaner.clean(img_array if img_array is not None else processed_bytes)
 
         # BƯỚC 2: PaddleOCR nhận diện thô
         raw_ocr_text, confidence, boxes, engine_name = ocr_engine.recognize(cleaned_img)
+
+        if not raw_ocr_text or not raw_ocr_text.strip():
+            logger.warning(f"OCR trả về text rỗng cho file {file.filename}")
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "OCR_EMPTY_RESULT",
+                    "message": "OCR trả về text rỗng",
+                    "metadata": img_meta
+                }
+            )
 
         # BƯỚC 2.5: Phân loại Candidate nhanh bằng Aspect Ratio & Cấu trúc
         candidate_info = StructuralHeuristics.classify_candidate(
@@ -87,11 +100,17 @@ async def process_ocr(
 
         # BƯỚC 3: Chuẩn hóa LLM
         final_text = raw_ocr_text
+        llm_invoked = False
         if normalize_with_llm and raw_ocr_text:
             if is_namecard:
+                # Đối với namecard, ta có thể dùng Fast-Path trích xuất trước để quyết định có gọi LLM không
+                # Tuy nhiên để đảm bảo text sạch, ta vẫn gọi normalize_namecard trừ khi text đã quá chuẩn.
+                # Hiện tại QwenTextNormalizer chưa trả về llm_invoked, ta sẽ gọi nó bình thường.
                 final_text = await qwen_normalizer.normalize_namecard(raw_ocr_text)
+                llm_invoked = True
             else:
                 final_text = await qwen_normalizer.normalize_text(raw_ocr_text)
+                llm_invoked = True
 
         # BƯỚC 4: Bóc tách thực thể Namecard (Nếu là Namecard hoặc có dấu hiệu thẻ)
         qr_info = img_meta.get("qr_result")
@@ -128,11 +147,19 @@ async def process_ocr(
             )
             dedup_dto = DedupResultDto(**dup_res)
 
-        # BƯỚC 4.5: Hợp nhất thông tin công ty qua DuckDuckGo / CompanyResolver
+        # BƯỚC 4.5: Hợp nhất thông tin công ty qua DuckDuckGo / CompanyResolver (chỉ gọi khi thiếu taxCode)
         company_info = None
         company_target = (extracted_fields_data.get("company") if extracted_fields_data else None) or (final_text.split("\n")[0] if final_text else "")
-        if company_target and len(company_target) > 5:
-            company_info = await company_resolver.resolve_company(company_name=company_target)
+        if company_target and len(company_target) > 5 and extracted_fields_data and not extracted_fields_data.get("taxCode"):
+            try:
+                company_info = await asyncio.wait_for(
+                    company_resolver.resolve_company(company_name=company_target),
+                    timeout=2.0
+                )
+                if company_info and company_info.get("taxCode") and not extracted_fields_data.get("taxCode"):
+                    extracted_fields_data["taxCode"] = company_info.get("taxCode")
+            except Exception as e:
+                logger.debug(f"[RoutesOcr] Company resolver skipped/timeout: {e}")
 
         formatted_boxes = [BoundingBoxDto(text=b["text"], points=b["points"]) for b in boxes]
 

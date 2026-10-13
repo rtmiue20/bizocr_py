@@ -1,4 +1,5 @@
 import logging
+import torch
 import numpy as np
 import cv2
 from typing import List, Dict, Any, Tuple
@@ -24,9 +25,10 @@ class PaddleOcrEngine:
     def _init_engines(self):
         if not self._initialized:
             try:
-                from paddleocr import PaddleOCR
+                # Lưu ý: Trên Windows, cần import torch / VietOCR trước PaddleOCR để tránh xung đột DLL (shm.dll)
                 from vietocr.tool.predictor import Predictor
                 from vietocr.tool.config import Cfg
+                from paddleocr import PaddleOCR
 
                 # 1. Khởi tạo PaddleOCR chỉ phục vụ Text Detection
                 max_dim = settings.OCR_MAX_IMAGE_DIM
@@ -41,7 +43,9 @@ class PaddleOcrEngine:
                     use_gpu=settings.USE_GPU,
                     det_limit_side_len=det_limit,
                     det_db_unclip_ratio=2.0,
-                    show_log=False
+                    show_log=False,
+                    use_onnx=False,
+                    enable_mkldnn=not settings.USE_GPU
                 )
 
                 # 2. VietOCR chuyên biệt cho Recognition tiếng Việt
@@ -54,7 +58,8 @@ class PaddleOcrEngine:
                 logger.info("Hybrid OCR khởi tạo thành công!")
             except Exception as e:
                 logger.error(f"Lỗi khởi tạo Hybrid OCR: {e}", exc_info=True)
-                self._initialized = True
+                self._initialized = False
+                raise RuntimeError(f"Lỗi khởi tạo Hybrid OCR: {e}") from e
 
     def _crop_image_by_points(self, img: np.ndarray, points: list) -> Image.Image:
         """Cắt và nắn thẳng bounding box từ ảnh gốc bằng Perspective Transform"""
@@ -145,7 +150,7 @@ class PaddleOcrEngine:
     def recognize(self, image: np.ndarray) -> Tuple[str, float, List[Dict[str, Any]], str]:
         self._init_engines()
         if not self._det_engine or not self._rec_engine:
-            return "", 0.0, [], self._engine_name
+            raise RuntimeError("OCR Engine chưa được khởi tạo thành công.")
 
         parsed_boxes = []
         confidences = []
@@ -155,20 +160,37 @@ class PaddleOcrEngine:
             dt_boxes, _ = self._det_engine.text_detector(image)
 
             if dt_boxes is not None and len(dt_boxes) > 0:
+                valid_boxes = []
+                cropped_images = []
+
                 for box_points in dt_boxes:
                     if box_points is None or len(box_points) == 0:
                         continue
 
-                    # Cắt ảnh theo box và gửi sang VietOCR
-                    cropped_pil = self._crop_image_by_points(image, box_points)
-                    text, conf = self._rec_engine.predict(cropped_pil, return_prob=True)
+                    # Lọc nhiễu: Bỏ qua các box quá nhỏ (chấm viền, hạt scan)
+                    pts = np.array(box_points, dtype=np.float32)
+                    w = np.linalg.norm(pts[1] - pts[0])
+                    h = np.linalg.norm(pts[3] - pts[0])
+                    if w < 5.0 or h < 5.0 or (w * h) < 25.0:
+                        continue
 
-                    flat_points = [int(coord) for pt in box_points for coord in pt]
-                    parsed_boxes.append({
-                        "text": str(text).strip(),
-                        "points": flat_points
-                    })
-                    confidences.append(float(conf))
+                    # Cắt ảnh nắn thẳng theo box
+                    cropped_pil = self._crop_image_by_points(image, box_points)
+                    valid_boxes.append(box_points)
+                    cropped_images.append(cropped_pil)
+
+                # Tối ưu hóa: Nhận diện song song theo Batch thay vì for loop tuần tự
+                if cropped_images:
+                    texts, probs = self._rec_engine.predict_batch(cropped_images, return_prob=True)
+                    for box_points, text, conf in zip(valid_boxes, texts, probs):
+                        clean_text = str(text).strip()
+                        if clean_text:
+                            flat_points = [int(coord) for pt in box_points for coord in pt]
+                            parsed_boxes.append({
+                                "text": clean_text,
+                                "points": flat_points
+                            })
+                            confidences.append(float(conf))
 
         except Exception as e:
             logger.error(f"Lỗi khi chạy Hybrid OCR: {e}", exc_info=True)

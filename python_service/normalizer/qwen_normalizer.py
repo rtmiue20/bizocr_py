@@ -2,6 +2,7 @@ import httpx
 import logging
 import re
 import unicodedata
+from typing import Optional
 from python_service.config import settings, detect_ollama_model
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,13 @@ class QwenTextNormalizer:
         self.ollama_url = f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/generate"
         self.model_name = detect_ollama_model(settings.OLLAMA_BASE_URL, settings.OLLAMA_MODEL)
         self.timeout = settings.OLLAMA_TIMEOUT_SECONDS
+        self._client: Optional[httpx.AsyncClient] = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            self._client = httpx.AsyncClient(timeout=self.timeout, limits=limits)
+        return self._client
 
     @staticmethod
     def fix_broken_emails(text: str) -> str:
@@ -77,6 +85,9 @@ class QwenTextNormalizer:
         if not raw_ocr_text or len(raw_ocr_text.strip()) < 5:
             return raw_ocr_text or ""
 
+        # Fast-path: Nếu text rất ngắn hoặc có vẻ đã chuẩn (dựa trên tỷ lệ dấu câu/số/chữ), có thể bỏ qua LLM.
+        # Ở đây ta ưu tiên độ chính xác nên chỉ bỏ qua khi quá ngắn.
+
         # Tiền xử lý: Dùng Regex quét và sửa email trước khi đưa vào LLM
         preprocessed_text = self.fix_broken_emails(raw_ocr_text)
 
@@ -100,38 +111,40 @@ class QwenTextNormalizer:
             "model": self.model_name,
             "prompt": prompt,
             "stream": False,
+            "keep_alive": "24h",
             "options": {
                 "temperature": 0.0,
                 "top_p": 0.9,
-                "num_predict": 2048
+                "num_ctx": 2048,
+                "num_predict": 512
             }
         }
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                logger.info(
-                    f"Đang gửi OCR text ({len(preprocessed_text)} chars) tới Ollama model '{self.model_name}'...")
+            client = self._get_client()
+            logger.info(
+                f"Đang gửi OCR text ({len(preprocessed_text)} chars) tới Ollama model '{self.model_name}'...")
+            response = await client.post(self.ollama_url, json=payload)
+
+            # Nếu lỗi 404 do model tag (ví dụ qwen2.5:3b-instruct vs qwen2.5:3b)
+            if response.status_code == 404:
+                alt_model = "qwen2.5:3b" if "instruct" in self.model_name else "qwen2.5:3b-instruct"
+                logger.warning(f"Ollama trả về 404 cho '{self.model_name}'. Thử lại với tag thay thế '{alt_model}'...")
+                payload["model"] = alt_model
                 response = await client.post(self.ollama_url, json=payload)
-
-                # Nếu lỗi 404 do model tag (ví dụ qwen2.5:3b-instruct vs qwen2.5:3b)
-                if response.status_code == 404:
-                    alt_model = "qwen2.5:3b" if "instruct" in self.model_name else "qwen2.5:3b-instruct"
-                    logger.warning(f"Ollama trả về 404 cho '{self.model_name}'. Thử lại với tag thay thế '{alt_model}'...")
-                    payload["model"] = alt_model
-                    response = await client.post(self.ollama_url, json=payload)
-                    if response.status_code == 200:
-                        self.model_name = alt_model
-
                 if response.status_code == 200:
-                    data = response.json()
-                    normalized = data.get("response", "").strip()
-                    if normalized:
-                        clean_text = re.sub(r"^```[a-zA-Z]*\n", "", normalized)
-                        clean_text = re.sub(r"\n```$", "", clean_text).strip()
-                        logger.info(f"Chuẩn hóa văn bản thành công bằng Qwen2.5 ({self.model_name})!")
-                        return clean_text
-                else:
-                    logger.warning(f"Ollama trả về status {response.status_code}: {response.text}")
+                    self.model_name = alt_model
+
+            if response.status_code == 200:
+                data = response.json()
+                normalized = data.get("response", "").strip()
+                if normalized:
+                    clean_text = re.sub(r"^```[a-zA-Z]*\n", "", normalized)
+                    clean_text = re.sub(r"\n```$", "", clean_text).strip()
+                    logger.info(f"Chuẩn hóa văn bản thành công bằng Qwen2.5 ({self.model_name})!")
+                    return clean_text
+            else:
+                logger.warning(f"Ollama trả về status {response.status_code}: {response.text}")
         except Exception as e:
             logger.warning(f"Không thể kết nối tới Ollama ({e}). Sử dụng Rule-based Normalization fallback.")
 
@@ -161,25 +174,30 @@ class QwenTextNormalizer:
             "model": self.model_name,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 0.0, "num_predict": 1024}
+            "keep_alive": "24h",
+            "options": {
+                "temperature": 0.0,
+                "num_ctx": 2048,
+                "num_predict": 512
+            }
         }
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            client = self._get_client()
+            res = await client.post(self.ollama_url, json=payload)
+            if res.status_code == 404:
+                alt = "qwen2.5:3b" if "instruct" in self.model_name else "qwen2.5:3b-instruct"
+                payload["model"] = alt
                 res = await client.post(self.ollama_url, json=payload)
-                if res.status_code == 404:
-                    alt = "qwen2.5:3b" if "instruct" in self.model_name else "qwen2.5:3b-instruct"
-                    payload["model"] = alt
-                    res = await client.post(self.ollama_url, json=payload)
-                    if res.status_code == 200:
-                        self.model_name = alt
-
                 if res.status_code == 200:
-                    text_out = res.json().get("response", "").strip()
-                    if text_out:
-                        clean = re.sub(r"^```[a-zA-Z]*\n", "", text_out)
-                        clean = re.sub(r"\n```$", "", clean).strip()
-                        return clean
+                    self.model_name = alt
+
+            if res.status_code == 200:
+                text_out = res.json().get("response", "").strip()
+                if text_out:
+                    clean = re.sub(r"^```[a-zA-Z]*\n", "", text_out)
+                    clean = re.sub(r"\n```$", "", clean).strip()
+                    return clean
         except Exception as e:
             logger.warning(f"Ollama normalize_namecard fallback: {e}")
 

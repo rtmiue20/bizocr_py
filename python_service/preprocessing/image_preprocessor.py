@@ -94,6 +94,7 @@ class ImagePreprocessor:
             image_for_sharpness=cropped_img,
             qr_result=qr_res.to_dict() if qr_res.has_qr else None,
         )
+        metadata["_image_array"] = cropped_img
         return buffer.tobytes(), metadata
 
     @staticmethod
@@ -119,6 +120,7 @@ class ImagePreprocessor:
             image_for_sharpness=img,
             qr_result=qr_res.to_dict() if qr_res.has_qr else None,
         )
+        metadata["_image_array"] = img
         return image_bytes, metadata
 
     @staticmethod

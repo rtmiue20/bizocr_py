@@ -46,6 +46,12 @@ is_production = ENV in ("production", "prod")
 async def lifespan(app: FastAPI):
     settings.create_required_directories()
     logger.info("BizOCR Service đã khởi tạo thành công hệ thống thư mục cấu hình.")
+    try:
+        from python_service.api.routes_ocr import ocr_engine
+        ocr_engine._init_engines()
+        logger.info("Hybrid OCR Engine (PaddleOCR + VietOCR) đã sẵn sàng nhận request.")
+    except Exception as e:
+        logger.error(f"Khởi tạo sớm OCR Engine thất bại: {e}", exc_info=True)
     yield
 
 

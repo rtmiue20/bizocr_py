@@ -1,7 +1,8 @@
 import cv2
 import numpy as np
 import logging
-from typing import Tuple
+from typing import Tuple, Union
+from python_service.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class ImageCleaner:
         return encoded.tobytes()
 
     @staticmethod
-    def resize_if_needed(image: np.ndarray, max_dim: int = 4000) -> np.ndarray:
+    def resize_if_needed(image: np.ndarray, max_dim: int = 1800) -> np.ndarray:
         h, w = image.shape[:2]
         # Thêm log để kiểm tra kích thước gốc thiết bị gửi lên so với giới hạn
         logger.info(f"Kích thước ảnh gốc nhận được: {w}x{h} (ngưỡng max_dim={max_dim})")
@@ -165,11 +166,17 @@ class ImageCleaner:
         return sharpened
 
     @classmethod
-    def clean(cls, image_bytes: bytes, max_dim: int = 4000) -> Tuple[np.ndarray, bytes]:
+    def clean(cls, image_input: Union[bytes, np.ndarray], max_dim: int = 1800) -> Tuple[np.ndarray, bytes]:
         """
         Quy trình xử lý hoàn chỉnh: Ảnh gốc -> Ảnh sạch
         """
-        raw_img = cls.decode_image(image_bytes)
+        if max_dim == 4000: # Fallback value in call
+            max_dim = settings.OCR_MAX_IMAGE_DIM
+
+        if isinstance(image_input, np.ndarray):
+            raw_img = image_input
+        else:
+            raw_img = cls.decode_image(image_input)
         img_resized = cls.resize_if_needed(raw_img, max_dim=max_dim)
 
         # 1. Deskew (Xoay thẳng)

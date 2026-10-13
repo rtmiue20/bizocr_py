@@ -403,9 +403,18 @@ class NamecardFieldTagger:
 
         # Kiểm tra độ đầy đủ: Cần có Name và (Company hoặc Phone hoặc Email)
         has_primary = bool(extracted["name"] and (extracted["company"] or extracted["phones"] or extracted["emails"]))
-        llm_invoked = False
+        
+        # Fast-Path: Nếu đã có đủ các trường quan trọng từ Regex/Heuristics và chất lượng Text cao, bỏ qua LLM
+        is_complete_enough = bool(
+            extracted["name"] and 
+            extracted["company"] and 
+            (extracted["phones"] or extracted["emails"]) and
+            extracted["title"] and
+            extracted["address"]
+        )
 
-        if not has_primary and len(raw_text) >= 15:
+        llm_invoked = False
+        if not is_complete_enough and not has_primary and len(raw_text) >= 15:
             # Gọi LLM Qwen Few-shot để bù đắp
             llm_res = await self._extract_via_qwen_fewshot(raw_text, extracted)
             if llm_res:

@@ -91,7 +91,7 @@ class Settings(BaseModel):
     OCR_ENGINE: str = os.getenv("OCR_ENGINE", "paddleocr")
     USE_GPU: bool = os.getenv("USE_GPU", "false").lower() in ("true", "1", "t")
     OCR_LANG: str = os.getenv("OCR_LANG", "vi")
-    OCR_MAX_IMAGE_DIM: int = int(os.getenv("OCR_MAX_IMAGE_DIM", "4000"))
+    OCR_MAX_IMAGE_DIM: int = int(os.getenv("OCR_MAX_IMAGE_DIM", "1800"))
 
     # Preprocessing Settings
     AUTO_DESKEW: bool = True
@@ -99,14 +99,16 @@ class Settings(BaseModel):
     DENOISE: bool = True
 
     # Quality Gate Settings
+    # Mặc định 'shadow': vẫn cho phép OCR xử lý để không chặn các ảnh webcam hơi mờ, chỉ gắn cờ đánh dấu
     QUALITY_GATE_MODE: str = os.getenv("QUALITY_GATE_MODE", "shadow").lower()
     QUALITY_GATE_MIN_CONTOUR_AREA_RATIO: float = float(
         os.getenv("QUALITY_GATE_MIN_CONTOUR_AREA_RATIO", "0.08")
     )
     QUALITY_GATE_MIN_WIDTH: int = int(os.getenv("QUALITY_GATE_MIN_WIDTH", "200"))
     QUALITY_GATE_MIN_HEIGHT: int = int(os.getenv("QUALITY_GATE_MIN_HEIGHT", "200"))
+    # Ngưỡng Laplacian 20.0 phù hợp với cả ảnh chụp webcam laptop và điện thoại
     QUALITY_GATE_MIN_LAPLACIAN: float = float(
-        os.getenv("QUALITY_GATE_MIN_LAPLACIAN", "40")
+        os.getenv("QUALITY_GATE_MIN_LAPLACIAN", "20.0")
     )
     QUALITY_GATE_MIN_ASPECT: float = float(os.getenv("QUALITY_GATE_MIN_ASPECT", "0.30"))
     QUALITY_GATE_MAX_ASPECT: float = float(os.getenv("QUALITY_GATE_MAX_ASPECT", "3.50"))
